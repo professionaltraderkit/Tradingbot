@@ -9,11 +9,33 @@
 
 import argparse
 import logging
+from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
 from bot.engine import Engine
+
+log = logging.getLogger("run")
+
+
+def load_env() -> None:
+    """Load .env from the bot's own directory and call out the common
+    setup mistakes (.env never created, or saved as .env.txt) explicitly."""
+    here = Path(__file__).resolve().parent
+    env = here / ".env"
+    if env.exists():
+        load_dotenv(env)
+        log.info("Loaded environment from %s", env)
+        return
+    txt = here / ".env.txt"
+    if txt.exists():
+        log.warning("Found %s — your editor added a .txt extension. "
+                    "Rename it to just '.env' and run again.", txt)
+    else:
+        log.warning("No .env file at %s — copy .env.example to .env and "
+                    "fill in your keys. Running without it (simulated "
+                    "broker, console reports).", env)
 
 
 def main() -> None:
@@ -29,7 +51,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    load_dotenv()
+    load_env()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
