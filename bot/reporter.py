@@ -112,7 +112,7 @@ def evening_report(store: StateStore, portfolio: PaperPortfolio,
 
     if blocked:
         lines.append("")
-        lines.append("Signals blocked by correlation filter:")
+        lines.append("Signals skipped (risk rules):")
         for ev in blocked:
             lines.append(f"  • {ev['message']}")
 

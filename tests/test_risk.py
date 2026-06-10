@@ -8,7 +8,7 @@ def risk():
     return RiskManager(
         risk_per_trade_pct=1.0,
         atr_stop_multiple=2.0,
-        correlation_group=["ES=F", "NQ=F", "BTC-USD"],
+        correlation_group=["SPY", "QQQ", "BTC/USD"],
         max_same_direction=2,
     )
 
@@ -36,6 +36,24 @@ def test_short_stop_is_above_entry(risk):
     assert plan.stop_price == pytest.approx(5050.0)
 
 
+def test_notional_cap_clamps_size_and_risk(risk):
+    # Tight stop: un-capped size would be 100k/1.0 = 100k shares = $60M notional.
+    equity, price, atr_value = 100_000.0, 600.0, 0.5
+    plan = risk.plan_trade("long", equity, price, atr_value,
+                           max_notional=equity)  # 100% of equity
+    assert plan.quantity * price == pytest.approx(100_000.0)
+    # Risk shrinks proportionally — loss at stop is qty * stop_distance.
+    assert plan.risk_amount == pytest.approx(plan.quantity * 1.0)
+    assert plan.risk_amount < 1000.0
+
+
+def test_notional_cap_inactive_when_size_is_small(risk):
+    plan = risk.plan_trade("long", 100_000, 5000.0, 100.0, max_notional=100_000)
+    # Un-capped: 1000/200 = 5 units = $25k notional, well under the cap.
+    assert plan.quantity == pytest.approx(5.0)
+    assert plan.risk_amount == pytest.approx(1000.0)
+
+
 def test_plan_rejects_bad_inputs(risk):
     assert risk.plan_trade("long", 100_000, 5000.0, 0.0) is None
     assert risk.plan_trade("long", 100_000, 0.0, 25.0) is None
@@ -43,18 +61,18 @@ def test_plan_rejects_bad_inputs(risk):
 
 
 def test_correlation_filter_blocks_third_risk_on_long(risk):
-    open_positions = {"ES=F": "long", "NQ=F": "long"}
-    assert risk.correlation_blocked("BTC-USD", "long", open_positions)
+    open_positions = {"SPY": "long", "QQQ": "long"}
+    assert risk.correlation_blocked("BTC/USD", "long", open_positions)
 
 
 def test_correlation_filter_allows_second_long_and_opposite_side(risk):
-    assert not risk.correlation_blocked("NQ=F", "long", {"ES=F": "long"})
+    assert not risk.correlation_blocked("QQQ", "long", {"SPY": "long"})
     # Shorting against two longs reduces net exposure — allowed.
     assert not risk.correlation_blocked(
-        "BTC-USD", "short", {"ES=F": "long", "NQ=F": "long"}
+        "BTC/USD", "short", {"SPY": "long", "QQQ": "long"}
     )
 
 
 def test_correlation_filter_ignores_instruments_outside_group(risk):
-    open_positions = {"ES=F": "long", "NQ=F": "long"}
-    assert not risk.correlation_blocked("GC=F", "long", open_positions)
+    open_positions = {"SPY": "long", "QQQ": "long"}
+    assert not risk.correlation_blocked("GLD", "long", open_positions)

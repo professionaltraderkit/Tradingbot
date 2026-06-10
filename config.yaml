@@ -2,10 +2,18 @@
 # All strategy logic is parameterized here so it can be tuned without code edits.
 
 account:
-  starting_equity: 100000.0   # paper money
+  starting_equity: 100000.0   # used by the simulated broker and backtests
   currency: USD
 
 timezone: America/New_York
+
+broker:
+  # "alpaca_paper": execute on your Alpaca paper account (needs ALPACA_API_KEY
+  #                 and ALPACA_SECRET_KEY in .env). Equity and fills come from
+  #                 Alpaca; stops and trade history are tracked locally.
+  # "simulated":    internal paper broker, no account needed (fills at candle
+  #                 close). Backtests always use the simulated broker.
+  mode: alpaca_paper
 
 reports:
   morning: "07:00"   # market briefing
@@ -15,15 +23,22 @@ risk:
   risk_per_trade_pct: 1.0     # hard cap: max loss per trade as % of equity
   atr_period: 14
   atr_stop_multiple: 2.0      # stop distance = multiple * ATR
+  # Cap position notional at this % of equity (no leverage by default).
+  # With tight intraday stops the un-capped 1%-risk size can imply several
+  # times the account in notional; the cap keeps orders inside a cash
+  # account's buying power, at the cost of risking less than the full 1%.
+  max_position_notional_pct: 100
   correlation_filter:
     # Don't stack risk-on exposure: at most `max_same_direction` concurrent
     # positions in the same direction within the group.
-    group: [ES=F, NQ=F, BTC-USD]
+    group: [SPY, QQQ, BTC/USD]
     max_same_direction: 2
 
+# Futures (ES=F, NQ=F, GC=F, CL=F) aren't tradable on Alpaca, so the bot
+# trades liquid ETF proxies. Bitcoin trades as real spot crypto.
 instruments:
   - name: "S&P 500"
-    ticker: "ES=F"
+    ticker: "SPY"
     timeframe: "15m"
     strategy: mean_reversion
     params:
@@ -34,7 +49,7 @@ instruments:
       rsi_overbought: 90
 
   - name: "Nasdaq 100"
-    ticker: "NQ=F"
+    ticker: "QQQ"
     timeframe: "15m"
     strategy: mean_reversion
     params:
@@ -45,16 +60,17 @@ instruments:
       rsi_overbought: 90
 
   - name: "Bitcoin"
-    ticker: "BTC-USD"
+    ticker: "BTC/USD"
     timeframe: "1h"
     strategy: momentum_breakout
+    allow_short: false          # Alpaca spot crypto can't be shorted
     params:
       breakout_period: 20
       exit_period: 10
       trend_ema_period: 50
 
   - name: "Gold"
-    ticker: "GC=F"
+    ticker: "GLD"
     timeframe: "4h"
     strategy: trend_following
     params:
@@ -62,7 +78,7 @@ instruments:
       slow_ema_period: 50
 
   - name: "Oil (WTI)"
-    ticker: "CL=F"
+    ticker: "USO"
     timeframe: "4h"
     strategy: trend_following
     params:

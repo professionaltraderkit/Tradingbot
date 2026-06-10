@@ -21,14 +21,19 @@ class RiskManager:
         self.max_same_direction = max_same_direction
 
     def plan_trade(self, side: str, equity: float, price: float,
-                   atr_value: float) -> TradePlan | None:
+                   atr_value: float, max_notional: float | None = None) -> TradePlan | None:
         """Size a position so the loss at the ATR stop is exactly
-        `risk_per_trade_pct` of equity. Returns None if inputs are unusable."""
+        `risk_per_trade_pct` of equity. If that size would exceed
+        `max_notional` (buying-power cap), the quantity is clamped and the
+        trade risks proportionally less. Returns None if inputs are unusable."""
         if price <= 0 or atr_value <= 0 or equity <= 0:
             return None
         stop_distance = self.atr_stop_multiple * atr_value
         risk_amount = equity * self.risk_per_trade_pct / 100
         quantity = risk_amount / stop_distance
+        if max_notional is not None and quantity * price > max_notional:
+            quantity = max_notional / price
+            risk_amount = quantity * stop_distance
         if side == "long":
             stop_price = price - stop_distance
         elif side == "short":

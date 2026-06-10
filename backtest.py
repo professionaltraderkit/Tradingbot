@@ -15,7 +15,7 @@ import logging
 import pandas as pd
 import yaml
 
-from bot import data
+from bot.data import MarketData
 from bot.indicators import atr
 from bot.portfolio import PaperPortfolio
 from bot.risk import RiskManager
@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 
 
 def backtest_instrument(inst: dict, df: pd.DataFrame, risk: RiskManager,
-                        atr_period: int, starting_equity: float) -> dict:
+                        atr_period: int, starting_equity: float,
+                        max_notional_pct: float = 100) -> dict:
     strategy = build_strategy(inst["strategy"], inst.get("params", {}))
     store = StateStore(":memory:", starting_equity)
     portfolio = PaperPortfolio(store)
@@ -47,7 +48,8 @@ def backtest_instrument(inst: dict, df: pd.DataFrame, risk: RiskManager,
         elif signal in (Signal.LONG, Signal.SHORT) and not pos:
             atr_value = float(atr(window, atr_period).iloc[-1])
             equity = portfolio.equity({ticker: price})
-            plan = risk.plan_trade(signal.value, equity, price, atr_value)
+            plan = risk.plan_trade(signal.value, equity, price, atr_value,
+                                   max_notional=equity * max_notional_pct / 100)
             if plan:
                 portfolio.open_position(ticker, name, plan)
 
@@ -94,17 +96,19 @@ def main() -> None:
     )
     starting_equity = config["account"]["starting_equity"]
 
+    feed = MarketData()
     results = []
     for inst in config["instruments"]:
-        df = data.fetch_candles(inst["ticker"], inst["timeframe"])
+        df = feed.fetch_candles(inst["ticker"], inst["timeframe"])
         if df.empty:
             print(f"!! no data for {inst['ticker']}, skipping")
             continue
         if args.days:
             cutoff = df.index[-1] - pd.Timedelta(days=args.days)
             df = df[df.index >= cutoff]
-        results.append(backtest_instrument(inst, df, risk,
-                                           risk_cfg["atr_period"], starting_equity))
+        results.append(backtest_instrument(
+            inst, df, risk, risk_cfg["atr_period"], starting_equity,
+            max_notional_pct=risk_cfg.get("max_position_notional_pct", 100)))
 
     if not results:
         print("No results.")
