@@ -9,6 +9,7 @@
 
 import argparse
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -38,6 +39,48 @@ def load_env() -> None:
                     "broker, console reports).", env)
 
 
+def show_status(config: dict) -> None:
+    """Print open positions, recent trades and recent activity from the
+    local database — no network calls, works while the bot is running."""
+    from bot.state import StateStore
+
+    store = StateStore(config["storage"]["db_path"],
+                       config["account"]["starting_equity"])
+    positions = store.open_positions()
+    print(f"\nOpen positions ({len(positions)}):")
+    for p in positions:
+        print(f"  {p['side']:5s} {p['name']:<12} qty {p['quantity']:.4f} "
+              f"@ {p['entry_price']:,.2f}  stop {p['stop_price']:,.2f}  "
+              f"since {p['opened_at'][:16]}")
+    if not positions:
+        print("  none")
+
+    trades = store.all_trades()
+    print(f"\nLast {min(10, len(trades))} closed trades (of {len(trades)} total):")
+    for t in trades[-10:]:
+        print(f"  {t['closed_at'][:16]}  {t['side']:5s} {t['name']:<12} "
+              f"{t['entry_price']:,.2f} -> {t['exit_price']:,.2f}  "
+              f"${t['pnl']:+,.2f}  ({t['reason']})")
+    if not trades:
+        print("  none yet")
+
+    if trades:
+        wins = sum(1 for t in trades if t["pnl"] > 0)
+        total = sum(t["pnl"] for t in trades)
+        print(f"\nAll-time: {len(trades)} trades, {wins / len(trades) * 100:.0f}% "
+              f"wins, realized P&L ${total:+,.2f}")
+
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    events = store.events_since(week_ago)
+    print(f"\nLast {min(10, len(events))} events (7 days):")
+    for ev in events[-10:]:
+        print(f"  {ev['at'][:16]}  [{ev['kind']}] {ev['message']}")
+    if not events:
+        print("  none")
+    print()
+    store.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-instrument paper trading bot")
     parser.add_argument("--config", default="config.yaml")
@@ -45,6 +88,8 @@ def main() -> None:
                         help="run one evaluation cycle and exit")
     parser.add_argument("--report", choices=["morning", "evening"],
                         help="build and send a report immediately, then exit")
+    parser.add_argument("--status", action="store_true",
+                        help="print open positions and recent trades, then exit")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -55,6 +100,10 @@ def main() -> None:
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.status:
+        show_status(config)
+        return
 
     engine = Engine(config)
     if args.report == "morning":
