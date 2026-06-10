@@ -1,0 +1,73 @@
+# Multi-instrument paper trading bot configuration.
+# All strategy logic is parameterized here so it can be tuned without code edits.
+
+account:
+  starting_equity: 100000.0   # paper money
+  currency: USD
+
+timezone: America/New_York
+
+reports:
+  morning: "07:00"   # market briefing
+  evening: "21:00"   # performance report
+
+risk:
+  risk_per_trade_pct: 1.0     # hard cap: max loss per trade as % of equity
+  atr_period: 14
+  atr_stop_multiple: 2.0      # stop distance = multiple * ATR
+  correlation_filter:
+    # Don't stack risk-on exposure: at most `max_same_direction` concurrent
+    # positions in the same direction within the group.
+    group: [ES=F, NQ=F, BTC-USD]
+    max_same_direction: 2
+
+instruments:
+  - name: "S&P 500"
+    ticker: "ES=F"
+    timeframe: "15m"
+    strategy: mean_reversion
+    params:
+      sma_period: 20
+      zscore_entry: 2.0
+      rsi_period: 2
+      rsi_oversold: 10
+      rsi_overbought: 90
+
+  - name: "Nasdaq 100"
+    ticker: "NQ=F"
+    timeframe: "15m"
+    strategy: mean_reversion
+    params:
+      sma_period: 20
+      zscore_entry: 2.0
+      rsi_period: 2
+      rsi_oversold: 10
+      rsi_overbought: 90
+
+  - name: "Bitcoin"
+    ticker: "BTC-USD"
+    timeframe: "1h"
+    strategy: momentum_breakout
+    params:
+      breakout_period: 20
+      exit_period: 10
+      trend_ema_period: 50
+
+  - name: "Gold"
+    ticker: "GC=F"
+    timeframe: "4h"
+    strategy: trend_following
+    params:
+      fast_ema_period: 20
+      slow_ema_period: 50
+
+  - name: "Oil (WTI)"
+    ticker: "CL=F"
+    timeframe: "4h"
+    strategy: trend_following
+    params:
+      fast_ema_period: 20
+      slow_ema_period: 50
+
+storage:
+  db_path: "tradingbot.db"
