@@ -19,11 +19,12 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-_LOOKBACK_DAYS = {"15m": 10, "1h": 60, "4h": 120}
+_LOOKBACK_DAYS = {"5m": 30, "15m": 10, "1h": 60, "4h": 120}
 _MAX_RETRIES = 3
 
 # yfinance fallback fetch plan: (interval, period). 4h is resampled from 1h.
 _YF_PLAN = {
+    "5m": ("5m", "30d"),
     "15m": ("15m", "10d"),
     "1h": ("1h", "60d"),
     "4h": ("1h", "120d"),
@@ -87,6 +88,7 @@ class MarketData:
     def _alpaca_timeframe(self, timeframe: str):
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
         return {
+            "5m": TimeFrame(5, TimeFrameUnit.Minute),
             "15m": TimeFrame(15, TimeFrameUnit.Minute),
             "1h": TimeFrame(1, TimeFrameUnit.Hour),
             "4h": TimeFrame(4, TimeFrameUnit.Hour),
@@ -143,8 +145,10 @@ class MarketData:
     def _yf_candles(self, ticker: str, timeframe: str) -> pd.DataFrame:
         import yfinance as yf
         interval, period = _YF_PLAN[timeframe]
+        # prepost: premarket/after-hours bars, needed for the level-reversal
+        # strategy's premarket levels (Alpaca IEX bars include them already).
         df = yf.download(_yf_symbol(ticker), interval=interval, period=period,
-                         progress=False, auto_adjust=True)
+                         progress=False, auto_adjust=True, prepost=True)
         if df is None or df.empty:
             return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):

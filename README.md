@@ -107,6 +107,29 @@ Keep it alive on a laptop with something like:
 nohup python run.py >> bot.log 2>&1 &
 ```
 
+## The second bot: Level Reversal
+
+`config-levels.yaml` defines a separate bot instance that day-trades SPY
+and QQQ on 5-minute candles by fading key intraday levels: the previous
+session's high/low and today's premarket high/low act as resistance and
+support. When a bar pierces a level and gets rejected (closes back on the
+original side with a counter-directional body), it shorts the failed
+breakout or buys the rejection, takes profit into the next level, and is
+always flat by 15:55 ET — no overnight risk.
+
+Run it alongside (or instead of) the main bot — each has its own config,
+database, history and reports:
+
+```bash
+python run.py --config config-levels.yaml             # the live loop
+python run.py --config config-levels.yaml --status    # its positions/trades
+python backtest.py --config config-levels.yaml        # backtest it
+```
+
+Both bots share the same Alpaca paper account and Telegram channel
+(reports are labeled with each bot's name), so don't put the same ticker
+in both configs at once.
+
 ## Backtesting
 
 ```bash

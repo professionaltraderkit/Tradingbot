@@ -43,9 +43,10 @@ def _vol_regime(df: pd.DataFrame, atr_period: int) -> str:
 
 
 def morning_briefing(instruments: list[dict], market: dict[str, pd.DataFrame],
-                     portfolio: PaperPortfolio, atr_period: int) -> str:
+                     portfolio: PaperPortfolio, atr_period: int,
+                     bot_name: str = "Trading bot") -> str:
     now = datetime.now()
-    lines = [f"☀️ Morning briefing — {now:%a %b %d, %Y}", ""]
+    lines = [f"☀️ Morning briefing — {bot_name} — {now:%a %b %d, %Y}", ""]
     positions = {p["ticker"]: p for p in portfolio.open_positions()}
 
     for inst in instruments:
@@ -77,13 +78,14 @@ def morning_briefing(instruments: list[dict], market: dict[str, pd.DataFrame],
 
 def evening_report(store: StateStore, portfolio: PaperPortfolio,
                    market: dict[str, pd.DataFrame],
-                   starting_equity: float) -> str:
+                   starting_equity: float,
+                   bot_name: str = "Trading bot") -> str:
     now = datetime.now()
     day_start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     trades = store.trades_since(day_start)
     blocked = store.events_since(day_start, kind="blocked")
 
-    lines = [f"🌙 Daily report — {now:%a %b %d, %Y}", ""]
+    lines = [f"🌙 Daily report — {bot_name} — {now:%a %b %d, %Y}", ""]
 
     if trades:
         wins = [t for t in trades if t["pnl"] > 0]

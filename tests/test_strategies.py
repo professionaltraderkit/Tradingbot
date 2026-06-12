@@ -110,3 +110,86 @@ class TestTrendFollowing:
         closes = list(np.linspace(2300, 2400, 60)) + list(np.linspace(2400, 2250, 30))
         df = make_ohlc(closes)
         assert TrendFollowing().evaluate(df, "long") == Signal.EXIT
+
+
+class TestLevelReversal:
+    """Synthetic two-day 5m session: day 1 sets PDH=605 / PDL=595, day 2's
+    premarket sets PMH=602 / PML=601, then a test bar is appended."""
+
+    def _frame(self, last_bar):
+        ts, o, h, l, c = last_bar
+        rows = []
+        # Day 1 regular session: flat 600 with one spike high and one spike low.
+        t = pd.Timestamp("2026-06-08 09:30", tz="America/New_York")
+        for i in range(78):
+            o1 = h1 = l1 = c1 = 600.0
+            if i == 30:
+                h1 = 605.0
+            if i == 40:
+                l1 = 595.0
+            rows.append((t + pd.Timedelta(minutes=5 * i), o1, h1, l1, c1))
+        # Day 2 premarket: 601-602 range.
+        t = pd.Timestamp("2026-06-09 08:00", tz="America/New_York")
+        for i in range(18):
+            rows.append((t + pd.Timedelta(minutes=5 * i), 601.5, 602.0, 601.0, 601.5))
+        rows.append((pd.Timestamp(f"2026-06-09 {ts}", tz="America/New_York"),
+                     o, h, l, c))
+        idx = pd.DatetimeIndex([r[0] for r in rows])
+        return pd.DataFrame(
+            {"Open": [r[1] for r in rows], "High": [r[2] for r in rows],
+             "Low": [r[3] for r in rows], "Close": [r[4] for r in rows]},
+            index=idx)
+
+    def test_levels_computed_from_sessions(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("12:00", 598, 598, 598, 598))
+        lvls = LevelReversal().levels(df)
+        assert lvls == {"PDH": 605.0, "PDL": 595.0, "PMH": 602.0, "PML": 601.0}
+
+    def test_short_on_rejection_at_prev_day_high(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("10:30", 604.6, 605.3, 604.2, 604.0))
+        assert LevelReversal().evaluate(df, None) == Signal.SHORT
+
+    def test_long_on_rejection_at_prev_day_low(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("11:00", 595.4, 595.9, 594.8, 595.8))
+        assert LevelReversal().evaluate(df, None) == Signal.LONG
+
+    def test_hold_between_levels(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("12:00", 598, 598.2, 597.8, 598))
+        assert LevelReversal().evaluate(df, None) == Signal.HOLD
+
+    def test_no_entry_before_trade_window(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("09:35", 604.6, 605.3, 604.2, 604.0))
+        assert LevelReversal().evaluate(df, None) == Signal.HOLD
+
+    def test_long_takes_profit_at_next_level(self):
+        from bot.strategies.level_reversal import LevelReversal
+        # Long from support; bar crosses PML (601) from below.
+        df = self._frame(("13:00", 600.8, 601.3, 600.7, 601.2))
+        assert LevelReversal().evaluate(df, "long") == Signal.EXIT
+
+    def test_short_takes_profit_at_next_level(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("13:00", 601.4, 601.5, 600.9, 601.0))
+        assert LevelReversal().evaluate(df, "short") == Signal.EXIT
+
+    def test_flat_by_end_of_session(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("15:55", 600, 600, 600, 600))
+        assert LevelReversal().evaluate(df, "long") == Signal.EXIT
+        assert LevelReversal().evaluate(df, "short") == Signal.EXIT
+
+    def test_hold_position_mid_session_between_levels(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("13:00", 598, 598.2, 597.8, 598))
+        assert LevelReversal().evaluate(df, "long") == Signal.HOLD
+
+    def test_naive_index_returns_hold(self):
+        from bot.strategies.level_reversal import LevelReversal
+        df = self._frame(("12:00", 598, 598, 598, 598))
+        df.index = df.index.tz_localize(None)
+        assert LevelReversal().evaluate(df, None) == Signal.HOLD

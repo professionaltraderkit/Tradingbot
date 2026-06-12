@@ -26,13 +26,14 @@ from .strategies import Signal, build_strategy
 
 log = logging.getLogger(__name__)
 
-_TIMEFRAME_MINUTES = {"15m": 15, "1h": 60, "4h": 240}
+_TIMEFRAME_MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
 
 class Engine:
     def __init__(self, config: dict, notifier: Notifier | None = None,
                  feed: MarketData | None = None, portfolio=None):
         self.config = config
+        self.bot_name = config.get("name", "Trading bot")
         self.tz = ZoneInfo(config.get("timezone", "America/New_York"))
         self.instruments = config["instruments"]
         for inst in self.instruments:
@@ -117,7 +118,8 @@ class Engine:
         atr_value = float(atr(df, self.atr_period).iloc[-1])
         equity = self.portfolio.equity({ticker: price})
         plan = self.risk.plan_trade(side, equity, price, atr_value,
-                                    max_notional=equity * self.max_notional_pct / 100)
+                                    max_notional=equity * self.max_notional_pct / 100,
+                                    stop_multiple=inst.get("atr_stop_multiple"))
         if plan is None:
             log.warning("Could not size %s trade on %s (atr=%s)", side, ticker, atr_value)
             return
@@ -164,11 +166,12 @@ class Engine:
 
     def _build_morning(self) -> str:
         return morning_briefing(self.instruments, self._fetch_all(),
-                                self.portfolio, self.atr_period)
+                                self.portfolio, self.atr_period,
+                                bot_name=self.bot_name)
 
     def _build_evening(self) -> str:
         return evening_report(self.store, self.portfolio, self._fetch_all(),
-                              self.starting_equity)
+                              self.starting_equity, bot_name=self.bot_name)
 
     # -- main loop ---------------------------------------------------------------
     def run_once(self) -> None:

@@ -169,3 +169,33 @@ def test_stop_sweep_between_candles(config, market):
     market["QQQ"].loc[market["QQQ"].index[-1], "Close"] = pos["stop_price"] * 0.99
     eng.sweep_stops()
     assert eng.store.get_position("QQQ") is None
+
+
+def test_level_bot_config_runs_end_to_end(tmp_path):
+    """Boot the second bot from config-levels.yaml: a rejection bar at the
+    previous day's high should open shorts on both index ETFs."""
+    from tests.test_strategies import TestLevelReversal
+
+    with open("config-levels.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg["storage"]["db_path"] = str(tmp_path / "levels.db")
+    cfg["broker"]["mode"] = "simulated"
+
+    rejection = TestLevelReversal()._frame(("10:30", 604.6, 605.3, 604.2, 604.0))
+    market = {"SPY": rejection, "QQQ": rejection}
+    eng = Engine(cfg, notifier=Notifier(token=None, chat_id=None),
+                 feed=FakeFeed(market))
+    eng.run_once()
+
+    sides = eng.portfolio.position_sides()
+    assert sides == {"SPY": "short", "QQQ": "short"}
+    for pos in eng.portfolio.open_positions():
+        # Stop respects the per-instrument 6x ATR override: wider than the
+        # global 2x would produce.
+        assert pos["stop_price"] > pos["entry_price"]
+        loss_at_stop = abs(pos["entry_price"] - pos["stop_price"]) * pos["quantity"]
+        assert loss_at_stop == pytest.approx(pos["risk_amount"], rel=1e-9)
+
+    morning = eng._build_morning()
+    assert "Level Reversal Bot" in morning
+    assert "PDH" in morning

@@ -1,6 +1,8 @@
 # Multi-instrument paper trading bot configuration.
 # All strategy logic is parameterized here so it can be tuned without code edits.
 
+name: "Main Bot"
+
 account:
   starting_equity: 100000.0   # used by the simulated broker and backtests
   currency: USD

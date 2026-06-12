@@ -1,0 +1,64 @@
+# Level Reversal Bot — a separate bot instance from the main one.
+#
+# Fades key intraday levels on the index ETFs: previous day high/low and
+# premarket high/low act as resistance/support. 5-minute candles, reversal
+# confirmation at the level, take-profit into the next level, always flat
+# by the close.
+#
+# Run alongside the main bot (each keeps its own database and history):
+#   python run.py --config config-levels.yaml
+#   python run.py --config config-levels.yaml --status
+
+name: "Level Reversal Bot"
+
+account:
+  starting_equity: 100000.0
+  currency: USD
+
+timezone: America/New_York
+
+broker:
+  mode: alpaca_paper
+  # NOTE: both bots share the same Alpaca paper account, so don't trade the
+  # same tickers in both configs at once — each bot tracks its own positions.
+
+reports:
+  morning: "07:05"   # offset from the main bot so Telegram messages don't collide
+  evening: "21:05"
+
+risk:
+  risk_per_trade_pct: 1.0
+  atr_period: 14
+  atr_stop_multiple: 2.0          # default; instruments override below
+  max_position_notional_pct: 100
+  correlation_filter:
+    group: [SPY, QQQ]
+    max_same_direction: 2          # both indices may take the same setup
+
+instruments:
+  - name: "S&P 500"
+    ticker: "SPY"
+    timeframe: "5m"
+    strategy: level_reversal
+    # 5m ATR is tiny; a wider multiple keeps the stop outside the noise
+    # around the level being faded.
+    atr_stop_multiple: 6.0
+    params:
+      tolerance_pct: 0.1          # how close to the level counts as a touch
+      trade_start: "09:45"        # skip the open's chaos
+      trade_end: "15:45"          # no fresh entries into the close
+      flatten_at: "15:55"         # always flat overnight
+
+  - name: "Nasdaq 100"
+    ticker: "QQQ"
+    timeframe: "5m"
+    strategy: level_reversal
+    atr_stop_multiple: 6.0
+    params:
+      tolerance_pct: 0.1
+      trade_start: "09:45"
+      trade_end: "15:45"
+      flatten_at: "15:55"
+
+storage:
+  db_path: "levelbot.db"
