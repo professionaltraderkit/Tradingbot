@@ -42,6 +42,21 @@ def backtest_instrument(inst: dict, df: pd.DataFrame, risk: RiskManager,
         portfolio.check_stop(ticker, float(bar["High"]), float(bar["Low"]))
 
         pos = store.get_position(ticker)
+        if pos:
+            action = strategy.manage(window, pos)
+            if action:
+                new_stop = action.get("stop")
+                if new_stop is not None:
+                    tightens = (new_stop > pos["stop_price"] if pos["side"] == "long"
+                                else new_stop < pos["stop_price"])
+                    if tightens:
+                        pos["stop_price"] = float(new_stop)
+                        store.save_position(pos)
+                if action.get("exit"):
+                    portfolio.close_position(ticker, float(action.get("price", price)),
+                                             reason=action["exit"])
+                pos = store.get_position(ticker)
+
         signal = strategy.evaluate(window, pos["side"] if pos else None)
         if signal == Signal.EXIT and pos:
             portfolio.close_position(ticker, price, reason="signal")
@@ -49,7 +64,9 @@ def backtest_instrument(inst: dict, df: pd.DataFrame, risk: RiskManager,
             atr_value = float(atr(window, atr_period).iloc[-1])
             equity = portfolio.equity({ticker: price})
             plan = risk.plan_trade(signal.value, equity, price, atr_value,
-                                   max_notional=equity * max_notional_pct / 100)
+                                   max_notional=equity * max_notional_pct / 100,
+                                   stop_multiple=inst.get("atr_stop_multiple"),
+                                   stop_price=strategy.initial_stop(window, signal.value))
             if plan:
                 portfolio.open_position(ticker, name, plan)
 

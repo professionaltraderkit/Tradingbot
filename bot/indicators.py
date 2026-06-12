@@ -47,3 +47,41 @@ def donchian_high(series: pd.Series, period: int) -> pd.Series:
 def donchian_low(series: pd.Series, period: int) -> pd.Series:
     """Lowest low of the *previous* `period` bars (excludes current bar)."""
     return series.rolling(period).min().shift(1)
+
+
+def adx(df: pd.DataFrame, period: int) -> pd.Series:
+    """Average Directional Index (Wilder). Measures trend strength."""
+    high, low, close = df["High"], df["Low"], df["Close"]
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = ((up > down) & (up > 0)) * up
+    minus_dm = ((down > up) & (down > 0)) * down
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    alpha = 1 / period
+    atr_s = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_s
+    minus_di = 100 * minus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_s
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    return dx.fillna(0).ewm(alpha=alpha, adjust=False).mean()
+
+
+def session_vwap(df: pd.DataFrame, tz: str = "America/New_York") -> pd.Series:
+    """Volume-weighted average price, anchored to the start of each
+    calendar day in `tz` (mirrors TradingView's session VWAP closely).
+    Falls back to equal weights if there is no usable volume."""
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    if "Volume" in df.columns and df["Volume"].sum() > 0:
+        vol = df["Volume"].astype(float).clip(lower=1e-9)
+    else:
+        vol = pd.Series(1.0, index=df.index)
+    if df.index.tz is not None:
+        day = pd.Index(df.index.tz_convert(tz).date)
+    else:
+        day = pd.Index(df.index.date)
+    pv = (tp * vol).groupby(day).cumsum()
+    vv = vol.groupby(day).cumsum()
+    return pv / vv

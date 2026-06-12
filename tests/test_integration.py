@@ -171,31 +171,49 @@ def test_stop_sweep_between_candles(config, market):
     assert eng.store.get_position("QQQ") is None
 
 
-def test_level_bot_config_runs_end_to_end(tmp_path):
-    """Boot the second bot from config-levels.yaml: a rejection bar at the
-    previous day's high should open shorts on both index ETFs."""
-    from tests.test_strategies import TestLevelReversal
+def test_vwap_bot_config_runs_end_to_end(tmp_path):
+    """Boot the second bot from config-levels.yaml: a pullback to a rising
+    VWAP opens longs with the strategy's structure stop, the breakeven
+    ratchet tightens the stop, and the target closes the trade."""
+    from tests.test_strategies import TestVwapPullback
 
     with open("config-levels.yaml") as f:
         cfg = yaml.safe_load(f)
     cfg["storage"]["db_path"] = str(tmp_path / "levels.db")
     cfg["broker"]["mode"] = "simulated"
 
-    rejection = TestLevelReversal()._frame(("10:30", 604.6, 605.3, 604.2, 604.0))
-    market = {"SPY": rejection, "QQQ": rejection}
+    helper = TestVwapPullback()
+    market = {t: helper._with_pullback_bar(helper._trend_frame())
+              for t in ("SPY", "QQQ")}
     eng = Engine(cfg, notifier=Notifier(token=None, chat_id=None),
                  feed=FakeFeed(market))
     eng.run_once()
 
     sides = eng.portfolio.position_sides()
-    assert sides == {"SPY": "short", "QQQ": "short"}
-    for pos in eng.portfolio.open_positions():
-        # Stop respects the per-instrument 6x ATR override: wider than the
-        # global 2x would produce.
-        assert pos["stop_price"] > pos["entry_price"]
-        loss_at_stop = abs(pos["entry_price"] - pos["stop_price"]) * pos["quantity"]
-        assert loss_at_stop == pytest.approx(pos["risk_amount"], rel=1e-9)
+    assert sides == {"SPY": "long", "QQQ": "long"}
+    pos = eng.store.get_position("SPY")
+    # Structure stop below the pullback bar's low, sized so the loss at the
+    # stop equals the recorded risk.
+    assert pos["stop_price"] < float(market["SPY"]["Low"].iloc[-1])
+    loss_at_stop = (pos["entry_price"] - pos["stop_price"]) * pos["quantity"]
+    assert loss_at_stop == pytest.approx(pos["risk_amount"], rel=1e-9)
 
     morning = eng._build_morning()
-    assert "Level Reversal Bot" in morning
-    assert "PDH" in morning
+    assert "VWAP Pullback Bot" in morning
+    assert "VWAP" in morning
+
+    # Next bar runs through +1R and then the 1.5R target: the engine should
+    # ratchet the stop and close at the target.
+    entry, stop = pos["entry_price"], pos["stop_price"]
+    rk = pos["risk_amount"] / pos["quantity"]
+    for t in ("SPY", "QQQ"):
+        ts = market[t].index[-1] + pd.Timedelta(minutes=5)
+        market[t].loc[ts] = [entry + 0.2, entry + 2 * rk, entry + 0.1,
+                             entry + 1.8 * rk, 1000.0]
+    eng.run_once()
+
+    assert eng.portfolio.position_sides() == {}
+    trades = [t for t in eng.store.all_trades() if t["ticker"] == "SPY"]
+    assert len(trades) == 1
+    assert trades[0]["reason"] == "target"
+    assert trades[0]["exit_price"] == pytest.approx(entry + 1.5 * rk)

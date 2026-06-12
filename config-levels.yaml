@@ -1,15 +1,16 @@
-# Level Reversal Bot — a separate bot instance from the main one.
+# VWAP Pullback Bot — a separate bot instance from the main one.
 #
-# Fades key intraday levels on the index ETFs: previous day high/low and
-# premarket high/low act as resistance/support. 5-minute candles, reversal
-# confirmation at the level, take-profit into the next level, always flat
-# by the close.
+# Port of the TradingView "Level Reversal v5" Pine strategy (tuned in the
+# TradingView Strategy Tester): trade WITH the intraday trend when price
+# pulls back to session VWAP, ADX confirming trend strength. Structure
+# stop beyond the pullback, fixed 1.5R target, breakeven ratchet at +1R,
+# lunch-chop and room-to-level filters, always flat by the close.
 #
 # Run alongside the main bot (each keeps its own database and history):
 #   python run.py --config config-levels.yaml
 #   python run.py --config config-levels.yaml --status
 
-name: "Level Reversal Bot"
+name: "VWAP Pullback Bot"
 
 account:
   starting_equity: 100000.0
@@ -29,36 +30,42 @@ reports:
 risk:
   risk_per_trade_pct: 1.0
   atr_period: 14
-  atr_stop_multiple: 2.0          # default; instruments override below
+  atr_stop_multiple: 2.0          # unused here: the strategy sets its own stop
   max_position_notional_pct: 100
   correlation_filter:
     group: [SPY, QQQ]
     max_same_direction: 2          # both indices may take the same setup
 
+# Parameters mirror the Pine script inputs (tradingview/vwap_pullback_v5.pine).
 instruments:
   - name: "S&P 500"
     ticker: "SPY"
     timeframe: "5m"
-    strategy: level_reversal
-    # 5m ATR is tiny; a wider multiple keeps the stop outside the noise
-    # around the level being faded.
-    atr_stop_multiple: 6.0
-    params:
-      tolerance_pct: 0.1          # how close to the level counts as a touch
-      trade_start: "09:45"        # skip the open's chaos
-      trade_end: "15:45"          # no fresh entries into the close
-      flatten_at: "15:55"         # always flat overnight
+    strategy: vwap_pullback
+    params: &vwap_params
+      tolerance_pct: 0.05         # VWAP touch tolerance (%)
+      stop_atr: 0.75              # stop beyond pullback (ATR mult)
+      target_r: 1.5               # target as R multiple
+      slope_bars: 3               # VWAP slope lookback
+      adx_len: 14
+      adx_min: 18                 # need a trend
+      atr_len: 14
+      vol_len: 20
+      use_lunch_filter: true      # skip 11:30-13:30 chop
+      use_room_filter: true       # don't buy into PDH / short into PDL
+      use_breakeven: true         # stop to breakeven at +1R
+      use_volume_filter: true     # above-average volume on signal bar
+      trade_start: "09:45"
+      trade_end: "15:30"
+      lunch_start: "11:30"
+      lunch_end: "13:30"
+      flatten_at: "15:50"
 
   - name: "Nasdaq 100"
     ticker: "QQQ"
     timeframe: "5m"
-    strategy: level_reversal
-    atr_stop_multiple: 6.0
-    params:
-      tolerance_pct: 0.1
-      trade_start: "09:45"
-      trade_end: "15:45"
-      flatten_at: "15:55"
+    strategy: vwap_pullback
+    params: *vwap_params
 
 storage:
   db_path: "levelbot.db"

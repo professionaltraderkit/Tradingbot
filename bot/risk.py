@@ -22,30 +22,34 @@ class RiskManager:
 
     def plan_trade(self, side: str, equity: float, price: float,
                    atr_value: float, max_notional: float | None = None,
-                   stop_multiple: float | None = None) -> TradePlan | None:
+                   stop_multiple: float | None = None,
+                   stop_price: float | None = None) -> TradePlan | None:
         """Size a position so the loss at the ATR stop is exactly
         `risk_per_trade_pct` of equity. If that size would exceed
         `max_notional` (buying-power cap), the quantity is clamped and the
         trade risks proportionally less. `stop_multiple` overrides the
         default ATR stop multiple (used by instruments on fast timeframes
-        where the default would put the stop inside the noise).
-        Returns None if inputs are unusable."""
+        where the default would put the stop inside the noise), and
+        `stop_price` overrides the stop entirely (structure-based stops
+        computed by the strategy). Returns None if inputs are unusable."""
+        if side not in ("long", "short"):
+            raise ValueError(f"Invalid side: {side}")
         if price <= 0 or atr_value <= 0 or equity <= 0:
             return None
-        stop_distance = (stop_multiple or self.atr_stop_multiple) * atr_value
+        if stop_price is not None:
+            if (side == "long") != (stop_price < price):
+                return None  # stop on the wrong side of entry
+            stop_distance = abs(price - stop_price)
+        else:
+            stop_distance = (stop_multiple or self.atr_stop_multiple) * atr_value
+            stop_price = price - stop_distance if side == "long" else price + stop_distance
+        if stop_distance <= 0 or stop_price <= 0:
+            return None
         risk_amount = equity * self.risk_per_trade_pct / 100
         quantity = risk_amount / stop_distance
         if max_notional is not None and quantity * price > max_notional:
             quantity = max_notional / price
             risk_amount = quantity * stop_distance
-        if side == "long":
-            stop_price = price - stop_distance
-        elif side == "short":
-            stop_price = price + stop_distance
-        else:
-            raise ValueError(f"Invalid side: {side}")
-        if stop_price <= 0:
-            return None
         return TradePlan(side=side, quantity=quantity, entry_price=price,
                          stop_price=stop_price, risk_amount=risk_amount)
 

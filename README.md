@@ -107,15 +107,18 @@ Keep it alive on a laptop with something like:
 nohup python run.py >> bot.log 2>&1 &
 ```
 
-## The second bot: Level Reversal
+## The second bot: VWAP Pullback
 
 `config-levels.yaml` defines a separate bot instance that day-trades SPY
-and QQQ on 5-minute candles by fading key intraday levels: the previous
-session's high/low and today's premarket high/low act as resistance and
-support. When a bar pierces a level and gets rejected (closes back on the
-original side with a counter-directional body), it shorts the failed
-breakout or buys the rejection, takes profit into the next level, and is
-always flat by 15:55 ET — no overnight risk.
+and QQQ on 5-minute candles, ported from a TradingView Pine strategy that
+was tuned in the Strategy Tester (`tradingview/vwap_pullback_v5.pine`).
+It trades WITH the intraday trend: when price is on one side of a rising
+or falling session VWAP with ADX confirming trend strength, a pullback
+that touches VWAP and closes back in the trend direction (on above-average
+volume) gets bought/shorted. The stop sits beyond the pullback extreme,
+the target is 1.5R, the stop ratchets to breakeven at +1R, entries skip
+the lunch chop (11:30–13:30 ET) and respect room to the previous day's
+high/low, and everything is flat by 15:50 ET — no overnight risk.
 
 Run it alongside (or instead of) the main bot — each has its own config,
 database, history and reports:

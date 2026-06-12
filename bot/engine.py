@@ -91,6 +91,12 @@ class Engine:
             return df
 
         pos = self.store.get_position(ticker)
+        if pos:
+            action = inst["_strategy"].manage(df, pos)
+            if action:
+                if self._apply_management(inst, pos, action, float(last["Close"])):
+                    return df
+                pos = self.store.get_position(ticker)
         side = pos["side"] if pos else None
         signal = inst["_strategy"].evaluate(df, side)
 
@@ -99,6 +105,27 @@ class Engine:
         elif signal in (Signal.LONG, Signal.SHORT) and not pos:
             self._try_open(inst, signal.value, df)
         return df
+
+    def _apply_management(self, inst: dict, pos: dict, action: dict,
+                          last_close: float) -> bool:
+        """Apply a strategy's manage() action. Stops may only tighten —
+        never loosen. Returns True if the position was closed."""
+        ticker = inst["ticker"]
+        new_stop = action.get("stop")
+        if new_stop is not None:
+            tightens = (new_stop > pos["stop_price"] if pos["side"] == "long"
+                        else new_stop < pos["stop_price"])
+            if tightens:
+                pos["stop_price"] = float(new_stop)
+                self.store.save_position(pos)
+                self.store.log_event(
+                    "stop",
+                    f"{pos['name']} ({ticker}) stop tightened to {new_stop:.2f}")
+        if action.get("exit"):
+            price = float(action.get("price", last_close))
+            self.portfolio.close_position(ticker, price, reason=action["exit"])
+            return True
+        return False
 
     def _try_open(self, inst: dict, side: str, df: pd.DataFrame) -> None:
         ticker, name = inst["ticker"], inst["name"]
@@ -119,7 +146,8 @@ class Engine:
         equity = self.portfolio.equity({ticker: price})
         plan = self.risk.plan_trade(side, equity, price, atr_value,
                                     max_notional=equity * self.max_notional_pct / 100,
-                                    stop_multiple=inst.get("atr_stop_multiple"))
+                                    stop_multiple=inst.get("atr_stop_multiple"),
+                                    stop_price=inst["_strategy"].initial_stop(df, side))
         if plan is None:
             log.warning("Could not size %s trade on %s (atr=%s)", side, ticker, atr_value)
             return

@@ -1,0 +1,107 @@
+//@version=5
+// Level Reversal v5 — VWAP trend pullback, refined.
+// This is the TradingView-tuned strategy the bot's `vwap_pullback`
+// strategy (bot/strategies/vwap_pullback.py) is ported from. Keep the two
+// in sync: parameters here mirror `params` in config-levels.yaml.
+//
+// Adds to v4.1: lunch-chop filter, room-to-level filter (don't buy into PDH /
+// short into PDL), breakeven ratchet at +1R, volume confirmation. All toggleable.
+strategy("Level Reversal v5 (VWAP trend pullback+)", overlay=true,
+     initial_capital=100000, currency=currency.USD,
+     calc_on_every_tick=false, process_orders_on_close=true)
+
+atrLen    = input.int(14,     "ATR length")
+tolPct    = input.float(0.05, "VWAP touch tolerance (%)", step=0.05)
+stopATR   = input.float(0.75, "Stop beyond pullback (ATR)", step=0.25)
+tpR       = input.float(1.5,  "Target (R multiple)", step=0.25)
+slopeBars = input.int(3,      "VWAP slope lookback")
+adxLen    = input.int(14,     "ADX length")
+adxMin    = input.float(18,   "Min ADX (need a trend)")
+riskPct   = input.float(1.0,  "Risk per trade (% equity)")
+maxNotPct = input.float(100,  "Max notional (%)")
+entrySess = input.session("0945-1530", "Entry window (ET)")
+
+useLunch  = input.bool(true,  "Skip lunch chop (11:30-13:30)")
+useRoom   = input.bool(true,  "Require room to PDH/PDL for target")
+useBE     = input.bool(true,  "Move stop to breakeven at +1R")
+useVol    = input.bool(true,  "Require above-avg volume on signal bar")
+volLen    = input.int(20,     "Volume SMA length")
+
+NY = "America/New_York"
+
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+atrVal = ta.atr(atrLen)
+[dpi, dmi, adx] = ta.dmi(adxLen, adxLen)
+vwap   = ta.vwap(hlc3)
+volOK  = not useVol or volume > ta.sma(volume, volLen)
+
+inEntry  = not na(time(timeframe.period, entrySess, NY))
+inLunch  = useLunch and not na(time(timeframe.period, "1130-1330", NY))
+inFlat   = not na(time(timeframe.period, "1550-1600", NY))
+trendOK  = adx > adxMin
+
+tol = close * tolPct / 100
+trendUp = close > vwap and vwap > vwap[slopeBars]
+trendDn = close < vwap and vwap < vwap[slopeBars]
+
+longSetup  = trendUp and trendOK and low  <= vwap + tol and close > vwap and close > open and volOK
+shortSetup = trendDn and trendOK and high >= vwap - tol and close < vwap and close < open and volOK
+
+canEnter = inEntry and not inLunch and not inFlat and session.ismarket and strategy.position_size == 0 and not na(atrVal) and atrVal > 0 and not na(vwap)
+
+var float entryPx = na
+var float stopPx  = na
+var float tgtPx   = na
+var float riskPS  = na
+
+if canEnter and longSetup and not shortSetup
+    sp = math.min(low, vwap) - stopATR * atrVal
+    rk = close - sp
+    if rk > 0
+        tg = close + tpR * rk
+        roomOK = not useRoom or na(pdh) or close >= pdh or tg <= pdh
+        q = math.floor(math.min(strategy.equity * riskPct / 100 / rk, strategy.equity * maxNotPct / 100 / close))
+        if q > 0 and roomOK
+            strategy.entry("L", strategy.long, qty=q)
+            entryPx := close
+            stopPx  := sp
+            tgtPx   := tg
+            riskPS  := rk
+
+if canEnter and shortSetup and not longSetup
+    sp = math.max(high, vwap) + stopATR * atrVal
+    rk = sp - close
+    if rk > 0
+        tg = close - tpR * rk
+        roomOK = not useRoom or na(pdl) or close <= pdl or tg >= pdl
+        q = math.floor(math.min(strategy.equity * riskPct / 100 / rk, strategy.equity * maxNotPct / 100 / close))
+        if q > 0 and roomOK
+            strategy.entry("S", strategy.short, qty=q)
+            entryPx := close
+            stopPx  := sp
+            tgtPx   := tg
+            riskPS  := rk
+
+// breakeven ratchet at +1R, then maintain bracket
+if strategy.position_size > 0
+    if useBE and high >= entryPx + riskPS
+        stopPx := math.max(stopPx, entryPx)
+    strategy.exit("Lx", from_entry="L", stop=stopPx, limit=tgtPx)
+if strategy.position_size < 0
+    if useBE and low <= entryPx - riskPS
+        stopPx := math.min(stopPx, entryPx)
+    strategy.exit("Sx", from_entry="S", stop=stopPx, limit=tgtPx)
+
+// EOD flatten — cancel FIRST, then close (zombie-bug fix)
+if inFlat and strategy.position_size != 0
+    strategy.cancel_all()
+    strategy.close_all(comment="EOD flatten")
+
+plot(vwap, "VWAP", color=color.new(color.fuchsia, 0))
+plot(pdh,  "PDH",  color=color.new(color.red, 0),   style=plot.style_linebr)
+plot(pdl,  "PDL",  color=color.new(color.green, 0), style=plot.style_linebr)
+plotchar(longSetup,  "l", "▲", location.belowbar, color.lime, size=size.tiny)
+plotchar(shortSetup, "s", "▼", location.abovebar, color.red,  size=size.tiny)
+bgcolor(inLunch ? color.new(color.orange, 94) : inEntry ? color.new(color.blue, 96) : na)

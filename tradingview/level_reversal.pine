@@ -1,37 +1,45 @@
 //@version=5
-// Level Reversal — Pine Script port of the bot's level_reversal strategy.
+// Level Reversal v2 — fades PDH/PDL and premarket high/low on 5m charts.
 //
-// Fades key intraday levels: previous day high/low (PDH/PDL) and today's
-// premarket high/low (PMH/PML). When a 5m bar wicks into a level but
-// closes back on the original side with a counter-directional body, it
-// shorts the failed breakout / buys the rejection. Take-profit when price
-// reaches the next level, hard ATR stop, always flat by 15:55 ET.
+// v2 fixes the failure modes of the naive version:
+//   1. Stop sits just beyond the rejected level (plus a small ATR buffer),
+//      not a huge ATR multiple away — risk is small and structural.
+//   2. A trade is only taken if the next level offers at least `minRR`
+//      reward per unit of risk (or a fixed-R target when no level exists).
+//   3. Each level may only be faded on its first `maxTouches` tests of the
+//      day — stops fighting trend days that grind through a level.
+//   4. A real rejection wick is required, not just any counter-color close.
+//   5. After a stop-out the strategy stands down for `cooldown` bars.
 //
-// Use on a 5-minute SPY or QQQ chart. Enable extended hours on the chart
-// (chart settings -> Symbol -> Session -> Extended trading hours), or
-// premarket levels will be unavailable and only PDH/PDL will trade.
+// Use on a 5-minute SPY/QQQ chart with extended hours enabled
+// (chart settings -> Symbol -> Extended trading hours), otherwise the
+// premarket levels are unavailable and only PDH/PDL trade.
 
-strategy("Level Reversal (PDH/PDL + Premarket)", overlay=true,
+strategy("Level Reversal v2 (PDH/PDL + Premarket)", overlay=true,
      initial_capital=100000, currency=currency.USD,
      calc_on_every_tick=false, process_orders_on_close=true)
 
-// ---------------- inputs (mirror config-levels.yaml) ----------------
-tolPct    = input.float(0.1,  "Touch tolerance (% of price)", step=0.05)
-atrLen    = input.int(14,     "ATR length")
-atrMult   = input.float(6.0,  "ATR stop multiple")
-riskPct   = input.float(1.0,  "Risk per trade (% of equity)")
-maxNotPct = input.float(100,  "Max position notional (% of equity)")
-entrySess = input.session("0945-1545", "Entry window (ET)")
+// ---------------- inputs ----------------
+tolPct     = input.float(0.10, "Touch tolerance (% of price)", step=0.05)
+wickFrac   = input.float(0.40, "Min rejection wick (fraction of bar range)", step=0.05)
+maxTouches = input.int(2,      "Max tests of a level per day", minval=1)
+stopBufATR = input.float(0.25, "Stop buffer beyond level (ATR mult)", step=0.05)
+atrLen     = input.int(14,     "ATR length")
+minRR      = input.float(1.2,  "Min reward:risk to take a level target", step=0.1)
+fixRR      = input.float(1.5,  "Target in R when no level target exists", step=0.1)
+cooldown   = input.int(6,      "Bars to stand down after a stop-out", minval=0)
+riskPct    = input.float(1.0,  "Risk per trade (% of equity)")
+maxNotPct  = input.float(100,  "Max position notional (% of equity)")
+entrySess  = input.session("0945-1545", "Entry window (ET)")
 
-NY = "America/New_York"
+NY     = "America/New_York"
+atrVal = ta.atr(atrLen)
+tol    = close * tolPct / 100
 
 // ---------------- levels ----------------
-// Previous day high/low from the daily series (regular session for stocks).
-// lookahead_on with [1] is the standard non-repainting prior-day level.
 pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
 pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
 
-// Premarket high/low, accumulated live and reset each new ET day.
 var float pmh = na
 var float pml = na
 newDay = ta.change(dayofmonth(time, NY)) != 0
@@ -42,46 +50,128 @@ if session.ispremarket
     pmh := na(pmh) ? high : math.max(pmh, high)
     pml := na(pml) ? low  : math.min(pml, low)
 
-// ---------------- session windows ----------------
-inEntryWindow = not na(time(timeframe.period, entrySess, NY))
-inFlatten     = not na(time(timeframe.period, "1555-1600", NY))
+// ---------------- touch counting (per level, reset daily) ----------------
+touching(lv) => not na(lv) and high >= lv - tol and low <= lv + tol
 
-// ---------------- rejection logic (same as the bot) ----------------
-tol = close * tolPct / 100
-rejShort(lv) => not na(lv) and lv > close and high >= lv - tol and close < lv and close < open
-rejLong(lv)  => not na(lv) and lv < close and low <= lv + tol and close > lv and close > open
+tPDH = touching(pdh)
+tPDL = touching(pdl)
+tPMH = touching(pmh)
+tPML = touching(pml)
 
-shortSetup = rejShort(pdh) or rejShort(pdl) or rejShort(pmh) or rejShort(pml)
-longSetup  = rejLong(pdh)  or rejLong(pdl)  or rejLong(pmh)  or rejLong(pml)
+var int cPDH = 0
+var int cPDL = 0
+var int cPMH = 0
+var int cPML = 0
+if newDay
+    cPDH := 0
+    cPDL := 0
+    cPMH := 0
+    cPML := 0
+if session.ismarket
+    cPDH += tPDH and not tPDH[1] ? 1 : 0
+    cPDL += tPDL and not tPDL[1] ? 1 : 0
+    cPMH += tPMH and not tPMH[1] ? 1 : 0
+    cPML += tPML and not tPML[1] ? 1 : 0
 
-// Take profit when price reaches the next level.
-crossUp(lv) => not na(lv) and open < lv and high >= lv
-crossDn(lv) => not na(lv) and open > lv and low <= lv
-tpLong  = crossUp(pdh) or crossUp(pdl) or crossUp(pmh) or crossUp(pml)
-tpShort = crossDn(pdh) or crossDn(pdl) or crossDn(pmh) or crossDn(pml)
+// ---------------- rejection setups ----------------
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+barRange  = high - low
 
-// ---------------- sizing: 1% risk at the ATR stop, notional capped ----------------
-atrVal   = ta.atr(atrLen)
-stopDist = atrMult * atrVal
-riskQty  = strategy.equity * riskPct / 100 / stopDist
-capQty   = strategy.equity * maxNotPct / 100 / close
-qty      = math.floor(math.min(riskQty, capQty))
+shortOK(lv, cnt) =>
+    not na(lv) and lv > close and high >= lv - tol and close < lv and
+     close < open and cnt <= maxTouches and barRange > 0 and
+     upperWick >= wickFrac * barRange
+
+longOK(lv, cnt) =>
+    not na(lv) and lv < close and low <= lv + tol and close > lv and
+     close > open and cnt <= maxTouches and barRange > 0 and
+     lowerWick >= wickFrac * barRange
+
+pick(best, lv, ok) =>
+    ok and (na(best) or math.abs(close - lv) < math.abs(close - best)) ? lv : best
+
+float shortLv = na
+shortLv := pick(shortLv, pdh, shortOK(pdh, cPDH))
+shortLv := pick(shortLv, pdl, shortOK(pdl, cPDL))
+shortLv := pick(shortLv, pmh, shortOK(pmh, cPMH))
+shortLv := pick(shortLv, pml, shortOK(pml, cPML))
+
+float longLv = na
+longLv := pick(longLv, pdh, longOK(pdh, cPDH))
+longLv := pick(longLv, pdl, longOK(pdl, cPDL))
+longLv := pick(longLv, pmh, longOK(pmh, cPMH))
+longLv := pick(longLv, pml, longOK(pml, cPML))
+
+// ---------------- next-level targets ----------------
+nearestBelow(p) =>
+    float t = na
+    lvls = array.from(pdh, pdl, pmh, pml)
+    for i = 0 to 3
+        lv = array.get(lvls, i)
+        if not na(lv) and lv < p - tol
+            t := na(t) ? lv : math.max(t, lv)
+    t
+
+nearestAbove(p) =>
+    float t = na
+    lvls = array.from(pdh, pdl, pmh, pml)
+    for i = 0 to 3
+        lv = array.get(lvls, i)
+        if not na(lv) and lv > p + tol
+            t := na(t) ? lv : math.min(t, lv)
+    t
+
+// ---------------- sessions / cooldown ----------------
+inWindow  = not na(time(timeframe.period, entrySess, NY))
+inFlatten = not na(time(timeframe.period, "1555-1600", NY))
+
+var float activeStop  = na
+var int   lastStopBar = na
+exitedLong  = strategy.position_size == 0 and strategy.position_size[1] > 0
+exitedShort = strategy.position_size == 0 and strategy.position_size[1] < 0
+if (exitedLong and not na(activeStop) and low <= activeStop) or
+     (exitedShort and not na(activeStop) and high >= activeStop)
+    lastStopBar := bar_index
+if exitedLong or exitedShort
+    activeStop := na
+
+coolingOff = not na(lastStopBar) and bar_index - lastStopBar <= cooldown
+canTrade   = inWindow and session.ismarket and strategy.position_size == 0 and
+     not coolingOff and not na(atrVal)
 
 // ---------------- orders ----------------
-canEnter = inEntryWindow and session.ismarket and strategy.position_size == 0
-           and qty > 0 and not na(atrVal)
+qtyFor(stopDist) =>
+    math.floor(math.min(strategy.equity * riskPct / 100 / stopDist,
+                        strategy.equity * maxNotPct / 100 / close))
 
-if canEnter and longSetup and not shortSetup
-    strategy.entry("L", strategy.long, qty=qty)
-    strategy.exit("L stop", from_entry="L", stop=close - stopDist)
-if canEnter and shortSetup and not longSetup
-    strategy.entry("S", strategy.short, qty=qty)
-    strategy.exit("S stop", from_entry="S", stop=close + stopDist)
+if canTrade and not na(shortLv) and na(longLv)
+    stop = math.max(high, shortLv) + stopBufATR * atrVal
+    dist = stop - close
+    lvTgt = nearestBelow(close)
+    float tgt = na
+    if not na(lvTgt) and dist > 0 and (close - lvTgt) / dist >= minRR
+        tgt := lvTgt
+    else if na(lvTgt) and dist > 0
+        tgt := close - fixRR * dist
+    if not na(tgt) and qtyFor(dist) > 0
+        strategy.entry("S", strategy.short, qty=qtyFor(dist))
+        strategy.exit("S x", from_entry="S", stop=stop, limit=tgt)
+        activeStop := stop
 
-if strategy.position_size > 0 and tpLong
-    strategy.close("L", comment="next level")
-if strategy.position_size < 0 and tpShort
-    strategy.close("S", comment="next level")
+if canTrade and not na(longLv) and na(shortLv)
+    stop = math.min(low, longLv) - stopBufATR * atrVal
+    dist = close - stop
+    lvTgt = nearestAbove(close)
+    float tgt = na
+    if not na(lvTgt) and dist > 0 and (lvTgt - close) / dist >= minRR
+        tgt := lvTgt
+    else if na(lvTgt) and dist > 0
+        tgt := close + fixRR * dist
+    if not na(tgt) and qtyFor(dist) > 0
+        strategy.entry("L", strategy.long, qty=qtyFor(dist))
+        strategy.exit("L x", from_entry="L", stop=stop, limit=tgt)
+        activeStop := stop
 
 if inFlatten and strategy.position_size != 0
     strategy.close_all(comment="EOD flatten")
@@ -92,4 +182,5 @@ plot(pdh, "PDH", color=color.new(color.red, 0),    style=plot.style_linebr)
 plot(pdl, "PDL", color=color.new(color.green, 0),  style=plot.style_linebr)
 plot(pmh, "PMH", color=color.new(color.orange, 0), style=plot.style_linebr)
 plot(pml, "PML", color=color.new(color.teal, 0),   style=plot.style_linebr)
-bgcolor(inEntryWindow ? color.new(color.blue, 96) : na)
+plot(ta.vwap(hlc3), "VWAP", color=color.new(color.gray, 30))
+bgcolor(inWindow ? color.new(color.blue, 96) : na)
