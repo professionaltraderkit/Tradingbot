@@ -1,0 +1,95 @@
+//@version=5
+// Level Reversal — Pine Script port of the bot's level_reversal strategy.
+//
+// Fades key intraday levels: previous day high/low (PDH/PDL) and today's
+// premarket high/low (PMH/PML). When a 5m bar wicks into a level but
+// closes back on the original side with a counter-directional body, it
+// shorts the failed breakout / buys the rejection. Take-profit when price
+// reaches the next level, hard ATR stop, always flat by 15:55 ET.
+//
+// Use on a 5-minute SPY or QQQ chart. Enable extended hours on the chart
+// (chart settings -> Symbol -> Session -> Extended trading hours), or
+// premarket levels will be unavailable and only PDH/PDL will trade.
+
+strategy("Level Reversal (PDH/PDL + Premarket)", overlay=true,
+     initial_capital=100000, currency=currency.USD,
+     calc_on_every_tick=false, process_orders_on_close=true)
+
+// ---------------- inputs (mirror config-levels.yaml) ----------------
+tolPct    = input.float(0.1,  "Touch tolerance (% of price)", step=0.05)
+atrLen    = input.int(14,     "ATR length")
+atrMult   = input.float(6.0,  "ATR stop multiple")
+riskPct   = input.float(1.0,  "Risk per trade (% of equity)")
+maxNotPct = input.float(100,  "Max position notional (% of equity)")
+entrySess = input.session("0945-1545", "Entry window (ET)")
+
+NY = "America/New_York"
+
+// ---------------- levels ----------------
+// Previous day high/low from the daily series (regular session for stocks).
+// lookahead_on with [1] is the standard non-repainting prior-day level.
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// Premarket high/low, accumulated live and reset each new ET day.
+var float pmh = na
+var float pml = na
+newDay = ta.change(dayofmonth(time, NY)) != 0
+if newDay
+    pmh := na
+    pml := na
+if session.ispremarket
+    pmh := na(pmh) ? high : math.max(pmh, high)
+    pml := na(pml) ? low  : math.min(pml, low)
+
+// ---------------- session windows ----------------
+inEntryWindow = not na(time(timeframe.period, entrySess, NY))
+inFlatten     = not na(time(timeframe.period, "1555-1600", NY))
+
+// ---------------- rejection logic (same as the bot) ----------------
+tol = close * tolPct / 100
+rejShort(lv) => not na(lv) and lv > close and high >= lv - tol and close < lv and close < open
+rejLong(lv)  => not na(lv) and lv < close and low <= lv + tol and close > lv and close > open
+
+shortSetup = rejShort(pdh) or rejShort(pdl) or rejShort(pmh) or rejShort(pml)
+longSetup  = rejLong(pdh)  or rejLong(pdl)  or rejLong(pmh)  or rejLong(pml)
+
+// Take profit when price reaches the next level.
+crossUp(lv) => not na(lv) and open < lv and high >= lv
+crossDn(lv) => not na(lv) and open > lv and low <= lv
+tpLong  = crossUp(pdh) or crossUp(pdl) or crossUp(pmh) or crossUp(pml)
+tpShort = crossDn(pdh) or crossDn(pdl) or crossDn(pmh) or crossDn(pml)
+
+// ---------------- sizing: 1% risk at the ATR stop, notional capped ----------------
+atrVal   = ta.atr(atrLen)
+stopDist = atrMult * atrVal
+riskQty  = strategy.equity * riskPct / 100 / stopDist
+capQty   = strategy.equity * maxNotPct / 100 / close
+qty      = math.floor(math.min(riskQty, capQty))
+
+// ---------------- orders ----------------
+canEnter = inEntryWindow and session.ismarket and strategy.position_size == 0
+           and qty > 0 and not na(atrVal)
+
+if canEnter and longSetup and not shortSetup
+    strategy.entry("L", strategy.long, qty=qty)
+    strategy.exit("L stop", from_entry="L", stop=close - stopDist)
+if canEnter and shortSetup and not longSetup
+    strategy.entry("S", strategy.short, qty=qty)
+    strategy.exit("S stop", from_entry="S", stop=close + stopDist)
+
+if strategy.position_size > 0 and tpLong
+    strategy.close("L", comment="next level")
+if strategy.position_size < 0 and tpShort
+    strategy.close("S", comment="next level")
+
+if inFlatten and strategy.position_size != 0
+    strategy.close_all(comment="EOD flatten")
+    strategy.cancel_all()
+
+// ---------------- visuals ----------------
+plot(pdh, "PDH", color=color.new(color.red, 0),    style=plot.style_linebr)
+plot(pdl, "PDL", color=color.new(color.green, 0),  style=plot.style_linebr)
+plot(pmh, "PMH", color=color.new(color.orange, 0), style=plot.style_linebr)
+plot(pml, "PML", color=color.new(color.teal, 0),   style=plot.style_linebr)
+bgcolor(inEntryWindow ? color.new(color.blue, 96) : na)
