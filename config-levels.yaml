@@ -53,7 +53,10 @@ instruments:
       vol_len: 20
       use_lunch_filter: true      # skip 11:30-13:30 chop
       use_room_filter: true       # don't buy into PDH / short into PDL
-      use_breakeven: true         # stop to breakeven at +1R
+      use_breakeven: true         # stop to breakeven at +breakeven_r
+      breakeven_r: 1.0            # R multiple that triggers the breakeven move
+      trail_atr: 0.0              # >0 enables an ATR trailing stop; pair with
+                                  # target_r: 0 to let winners run uncapped
       use_volume_filter: true     # above-average volume on signal bar
       trade_start: "09:45"
       trade_end: "15:30"
@@ -66,6 +69,11 @@ instruments:
     timeframe: "5m"
     strategy: vwap_pullback
     params: *vwap_params
+
+costs:
+  per_side_bps: 2.0   # backtest transaction cost (commission + slippage),
+                      # basis points of notional per side. ~2 bp ≈ SPY/QQQ
+                      # spread plus a little slippage.
 
 storage:
   db_path: "levelbot.db"

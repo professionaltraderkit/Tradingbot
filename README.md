@@ -136,20 +136,49 @@ in both configs at once.
 ## Backtesting
 
 ```bash
-python backtest.py             # full available history per instrument
-python backtest.py --days 30   # restrict to the last 30 days
+python backtest.py                              # main bot, all instruments
+python backtest.py --config config-levels.yaml  # the VWAP bot
+python backtest.py --days 30                     # restrict the window
+python backtest.py --cost-bps 3                  # override transaction cost
 ```
 
-Runs the exact same strategy, sizing and stop code over historical candles
-(Alpaca data if keys are set, Yahoo otherwise) and prints per-instrument
-stats. Backtests always use the internal simulator — no orders are sent.
+Runs the exact same strategy, sizing, stop and management code over
+historical candles (Alpaca data if keys are set, Yahoo otherwise) and
+prints per-instrument stats **net of transaction costs** (commission +
+slippage, default 2 bp/side — set `costs.per_side_bps` in the config).
+The columns: trades, win %, **PF** (profit factor = gross wins / gross
+losses; above 1.0 is profitable), **Expect$** (average $ per trade),
+net P&L, return %, and max drawdown. Backtests always use the internal
+simulator — no orders are sent.
+
+## Optimizing (find better parameters on your own data)
+
+```bash
+python optimize.py --config config-levels.yaml
+```
+
+Sweeps a grid of strategy parameters (ADX threshold, stop distance, target
+R, trailing stop, breakeven, morning-only vs full session) for each
+instrument. Crucially it splits the history into an **in-sample** slice and
+an **out-of-sample** slice and ranks combinations by how well they hold up
+on *both* — the guardrail against overfitting. The top in-sample result is
+almost always a fluke, especially on a month of data; a combo that is
+positive on both slices is the only kind worth forward-testing. It prints a
+ranked table and a ready-to-paste `params:` block, but treats every result
+as a hypothesis, not a guarantee.
 
 ## Tuning
 
-Everything lives in `config.yaml`: instruments, strategy parameters,
+Everything lives in the config files: instruments, strategy parameters,
 risk-per-trade, ATR stop multiple, notional cap, the correlation group and
-cap, report times, starting equity, broker mode. No code edits needed for
-parameter changes.
+cap, report times, starting equity, broker mode, transaction costs. No code
+edits needed for parameter changes.
+
+The VWAP bot's exit behaviour is fully configurable in `config-levels.yaml`:
+`target_r` (fixed target, set to 0 to disable), `trail_atr` (ATR trailing
+stop, the usual fix for a low-win-rate trend strategy — pair `trail_atr: 2.5`
+with `target_r: 0` to let winners run), `use_breakeven` / `breakeven_r`,
+`adx_min` (trend-strength gate), and the entry window.
 
 ## Tests
 

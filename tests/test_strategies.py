@@ -304,3 +304,53 @@ class TestVwapPullback:
     def test_manage_holds_mid_trade(self):
         df = self._manage_frame("2026-06-09 14:00", 600.4, 600.9, 600.2, 600.7)
         assert self._strategy().manage(df, self._position()) is None
+
+
+class TestVwapPullbackExits:
+    """Trailing stop and breakeven-trigger behavior in manage()."""
+
+    def _frame(self, closes, start="2026-06-09 10:00"):
+        n = len(closes)
+        idx = pd.date_range(start, periods=n, freq="5min", tz="America/New_York")
+        c = np.array(closes, dtype=float)
+        return pd.DataFrame({"Open": c, "High": c + 0.3, "Low": c - 0.3,
+                             "Close": c, "Volume": np.full(n, 1000.0)}, index=idx)
+
+    def _strategy(self, **kw):
+        from bot.strategies.vwap_pullback import VwapPullback
+        return VwapPullback(**kw)
+
+    def _position(self, stop=590.0, entry=600.0):
+        return {"ticker": "SPY", "name": "S&P 500", "side": "long",
+                "entry_price": entry, "stop_price": stop,
+                "quantity": 10.0, "risk_amount": (entry - stop) * 10.0}
+
+    def test_trailing_stop_tightens_as_price_rises(self):
+        df = self._frame(np.linspace(600, 620, 20))  # steady rise
+        strat = self._strategy(target_r=0.0, trail_atr=2.0, use_breakeven=False)
+        action = strat.manage(df, self._position(stop=590.0))
+        assert action is not None and "stop" in action
+        assert action["stop"] > 590.0  # ratcheted up toward price
+
+    def test_trailing_stop_does_not_loosen(self):
+        df = self._frame(np.linspace(600, 605, 20))
+        strat = self._strategy(target_r=0.0, trail_atr=2.0, use_breakeven=False)
+        # Stop already very tight (just below price): trail would be lower,
+        # so manage must not move it.
+        action = strat.manage(df, self._position(stop=604.5))
+        assert action is None
+
+    def test_breakeven_trigger_respects_breakeven_r(self):
+        # +1R reached but not +2R: with breakeven_r=2.0 no move yet.
+        df = self._frame([601.0] * 20)  # high ~601.3 = entry +0.65R (risk=2/sh)
+        strat = self._strategy(trail_atr=0.0, breakeven_r=2.0)
+        assert strat.manage(df, self._position(stop=598.0)) is None
+        # Same bar with breakeven_r=0.1 does ratchet to entry.
+        strat2 = self._strategy(trail_atr=0.0, breakeven_r=0.1)
+        assert strat2.manage(df, self._position(stop=598.0)) == {"stop": 600.0}
+
+    def test_target_disabled_when_zero(self):
+        # Price far above any 1.5R target, but target_r=0 means no target exit.
+        df = self._frame([650.0] * 20)
+        strat = self._strategy(target_r=0.0, trail_atr=0.0, use_breakeven=False)
+        assert strat.manage(df, self._position(stop=598.0)) is None

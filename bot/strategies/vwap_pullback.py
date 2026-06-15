@@ -37,7 +37,8 @@ class VwapPullback(Strategy):
     def __init__(self, tolerance_pct=0.05, stop_atr=0.75, target_r=1.5,
                  slope_bars=3, adx_len=14, adx_min=18.0, atr_len=14,
                  vol_len=20, use_lunch_filter=True, use_room_filter=True,
-                 use_breakeven=True, use_volume_filter=True,
+                 use_breakeven=True, breakeven_r=1.0, trail_atr=0.0,
+                 use_volume_filter=True,
                  trade_start="09:45", trade_end="15:30",
                  lunch_start="11:30", lunch_end="13:30", flatten_at="15:50"):
         self.tolerance_pct = tolerance_pct
@@ -51,6 +52,11 @@ class VwapPullback(Strategy):
         self.use_lunch_filter = use_lunch_filter
         self.use_room_filter = use_room_filter
         self.use_breakeven = use_breakeven
+        self.breakeven_r = breakeven_r
+        # trail_atr > 0 enables an ATR trailing stop (Chandelier-style) using
+        # the highest high / lowest low of the last `atr_len` bars. Pair with
+        # target_r = 0 to let winners run with no fixed cap.
+        self.trail_atr = trail_atr
         self.use_volume_filter = use_volume_filter
         self.trade_start = _parse_time(trade_start)
         self.trade_end = _parse_time(trade_end)
@@ -152,20 +158,36 @@ class VwapPullback(Strategy):
         risk_per_unit = position["risk_amount"] / position["quantity"]
         if risk_per_unit <= 0:
             return None
+
+        atr_now = float(atr(df, self.atr_len).iloc[-1]) if self.trail_atr else 0.0
         if position["side"] == "long":
-            target = entry + self.target_r * risk_per_unit
-            if float(last["High"]) >= target:
-                return {"exit": "target", "price": target}
-            if (self.use_breakeven and float(last["High"]) >= entry + risk_per_unit
-                    and position["stop_price"] < entry):
-                return {"stop": entry}
+            if self.target_r > 0:
+                target = entry + self.target_r * risk_per_unit
+                if float(last["High"]) >= target:
+                    return {"exit": "target", "price": target}
+            new_stop = position["stop_price"]
+            if (self.use_breakeven and float(last["High"]) >= entry
+                    + self.breakeven_r * risk_per_unit):
+                new_stop = max(new_stop, entry)
+            if self.trail_atr and atr_now > 0:
+                trail = float(df["High"].tail(self.atr_len).max()) - self.trail_atr * atr_now
+                new_stop = max(new_stop, trail)
+            if new_stop > position["stop_price"]:
+                return {"stop": new_stop}
         else:
-            target = entry - self.target_r * risk_per_unit
-            if float(last["Low"]) <= target:
-                return {"exit": "target", "price": target}
-            if (self.use_breakeven and float(last["Low"]) <= entry - risk_per_unit
-                    and position["stop_price"] > entry):
-                return {"stop": entry}
+            if self.target_r > 0:
+                target = entry - self.target_r * risk_per_unit
+                if float(last["Low"]) <= target:
+                    return {"exit": "target", "price": target}
+            new_stop = position["stop_price"]
+            if (self.use_breakeven and float(last["Low"]) <= entry
+                    - self.breakeven_r * risk_per_unit):
+                new_stop = min(new_stop, entry)
+            if self.trail_atr and atr_now > 0:
+                trail = float(df["Low"].tail(self.atr_len).min()) + self.trail_atr * atr_now
+                new_stop = min(new_stop, trail)
+            if new_stop < position["stop_price"]:
+                return {"stop": new_stop}
         return None
 
     def stance(self, df: pd.DataFrame) -> str:
