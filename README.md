@@ -133,6 +133,22 @@ Both bots share the same Alpaca paper account and Telegram channel
 (reports are labeled with each bot's name), so don't put the same ticker
 in both configs at once.
 
+## The third bot: Opening-Range Breakout (ORB)
+
+`config-orb.yaml` trades the first breakout of the day's opening range on
+SPY/QQQ (5m): it sets the range as the high/low of the first `or_minutes`
+after the open, then takes the first close beyond either side — long above,
+short below — once per side per day, flat by the close. A different
+mechanism from the VWAP bot (rides a volatility expansion rather than
+fading a level). Stop at the opposite end of the range (or an ATR
+distance), 1R target by default, with the same breakeven/trailing options.
+
+```bash
+python backtest.py --config config-orb.yaml
+python optimize.py --config config-orb.yaml
+python run.py --config config-orb.yaml
+```
+
 ## Backtesting
 
 ```bash

@@ -30,15 +30,25 @@ from bot.data import MarketData
 
 log = logging.getLogger(__name__)
 
-# Grid swept for each instrument. Keys must be VwapPullback parameters.
-# Keep it modest — every combo is a full backtest on both slices.
-GRID = {
-    "adx_min": [18, 25, 32],
-    "stop_atr": [0.5, 1.0],
-    "target_r": [1.5, 2.5, 0.0],   # 0.0 = no fixed target (trail only)
-    "trail_atr": [0.0, 2.5],
-    "use_breakeven": [True, False],
-    "trade_end": ["11:30", "15:30"],  # morning-only vs full session
+# Grid swept per strategy. Keys must be that strategy's constructor params.
+# Keep each modest — every combo is a full backtest on both slices.
+GRIDS = {
+    "vwap_pullback": {
+        "adx_min": [18, 25, 32],
+        "stop_atr": [0.5, 1.0],
+        "target_r": [1.5, 2.5, 0.0],   # 0.0 = no fixed target (trail only)
+        "trail_atr": [0.0, 2.5],
+        "use_breakeven": [True, False],
+        "trade_end": ["11:30", "15:30"],  # morning-only vs full session
+    },
+    "opening_range_breakout": {
+        "or_minutes": [15, 30, 60],
+        "stop_mode": ["range", "atr"],
+        "target_r": [1.0, 2.0, 0.0],   # 0.0 = no fixed target (trail only)
+        "trail_atr": [0.0, 2.0],
+        "use_breakeven": [True, False],
+        "entry_end": ["12:00", "15:00"],
+    },
 }
 
 
@@ -47,7 +57,7 @@ def combos(grid: dict):
     for values in itertools.product(*(grid[k] for k in keys)):
         combo = dict(zip(keys, values))
         # An exit must exist: skip "no target AND no trail" (stop/EOD only).
-        if combo["target_r"] == 0.0 and combo["trail_atr"] == 0.0:
+        if combo.get("target_r", 1) == 0.0 and combo.get("trail_atr", 1) == 0.0:
             continue
         yield combo
 
@@ -69,12 +79,17 @@ def evaluate(inst, train_df, test_df, combo, risk, atr_period,
 
 def optimize_instrument(inst, df, risk, atr_period, equity, max_notional_pct,
                         cost_bps, train_frac, min_trades, top):
+    grid = GRIDS.get(inst["strategy"])
+    if grid is None:
+        print(f"\n=== {inst['name']} ({inst['ticker']}) — no optimizer grid "
+              f"for strategy '{inst['strategy']}', skipping ===")
+        return None
     split = int(len(df) * train_frac)
     train_df, test_df = df.iloc[:split], df.iloc[split:]
     print(f"\n=== {inst['name']} ({inst['ticker']}) — "
           f"{len(train_df)} train bars / {len(test_df)} test bars ===")
 
-    all_combos = list(combos(GRID))
+    all_combos = list(combos(grid))
     total = len(all_combos)
     min_test = max(3, min_trades // 3)  # the test slice is smaller
     rows = []
@@ -93,18 +108,16 @@ def optimize_instrument(inst, df, risk, atr_period, equity, max_notional_pct,
         return None
 
     rows.sort(key=lambda r: r["robust"], reverse=True)
-    print(f"\n  {'adxX':>4} {'sATR':>4} {'tgtR':>4} {'trlA':>4} {'BE':>3} "
-          f"{'end':>5} | {'trTr':>5} {'trRet%':>7} {'trPF':>5} | "
-          f"{'teTr':>5} {'teRet%':>7} {'tePF':>5}")
+    print(f"\n  {'trTr':>5} {'trRet%':>7} {'trPF':>5} | "
+          f"{'teTr':>5} {'teRet%':>7} {'tePF':>5} | params")
     print("  " + "-" * 78)
     for r in rows[:top]:
-        c, tr, te = r["combo"], r["train"], r["test"]
+        tr, te = r["train"], r["test"]
         tr_pf = "inf" if tr["profit_factor"] == float("inf") else f"{tr['profit_factor']:.2f}"
         te_pf = "inf" if te["profit_factor"] == float("inf") else f"{te['profit_factor']:.2f}"
-        print(f"  {c['adx_min']:>4} {c['stop_atr']:>4} {c['target_r']:>4} "
-              f"{c['trail_atr']:>4} {str(c['use_breakeven'])[0]:>3} "
-              f"{c['trade_end']:>5} | {tr['trades']:>5} {tr['return_pct']:>7.2f} "
-              f"{tr_pf:>5} | {te['trades']:>5} {te['return_pct']:>7.2f} {te_pf:>5}")
+        params = ", ".join(f"{k}={v}" for k, v in r["combo"].items())
+        print(f"  {tr['trades']:>5} {tr['return_pct']:>7.2f} {tr_pf:>5} | "
+              f"{te['trades']:>5} {te['return_pct']:>7.2f} {te_pf:>5} | {params}")
 
     best = rows[0]
     robust_positive = best["train"]["return_pct"] > 0 and best["test"]["return_pct"] > 0

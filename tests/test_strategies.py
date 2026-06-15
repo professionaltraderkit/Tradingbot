@@ -354,3 +354,80 @@ class TestVwapPullbackExits:
         df = self._frame([650.0] * 20)
         strat = self._strategy(target_r=0.0, trail_atr=0.0, use_breakeven=False)
         assert strat.manage(df, self._position(stop=598.0)) is None
+
+
+class TestOpeningRangeBreakout:
+    """Synthetic single-day 5m frame: first 6 bars (09:30-09:55) form the
+    opening range 599-601, then inside bars, then a breakout bar."""
+
+    def _orb_frame(self, direction="long", n_inside=20,
+                   second_breakout=False, no_breakout=False):
+        bars = [(600.0, 601.0, 599.0, 600.0)] * 6           # opening range
+        bars += [(600.0, 600.6, 599.4, 600.0)] * n_inside   # inside the range
+        up = (600.5, 602.5, 600.4, 602.0)                   # closes 602 > OR high
+        dn = (599.5, 599.6, 597.5, 598.0)                   # closes 598 < OR low
+        if no_breakout:
+            bars += [(600.0, 600.6, 599.4, 600.0)]
+        else:
+            bars += [up if direction == "long" else dn]
+            if second_breakout:
+                bars += [up if direction == "long" else dn]
+        idx = pd.date_range("2026-06-09 09:30", periods=len(bars), freq="5min",
+                            tz="America/New_York")
+        return pd.DataFrame(
+            {"Open": [b[0] for b in bars], "High": [b[1] for b in bars],
+             "Low": [b[2] for b in bars], "Close": [b[3] for b in bars],
+             "Volume": [1000.0] * len(bars)}, index=idx)
+
+    def _strategy(self, **kw):
+        from bot.strategies.opening_range_breakout import OpeningRangeBreakout
+        return OpeningRangeBreakout(**kw)
+
+    def test_long_on_first_breakout_above_range(self):
+        assert self._strategy().evaluate(self._orb_frame("long"), None) == Signal.LONG
+
+    def test_short_on_first_breakdown_below_range(self):
+        assert self._strategy().evaluate(self._orb_frame("short"), None) == Signal.SHORT
+
+    def test_hold_while_inside_range(self):
+        assert self._strategy().evaluate(self._orb_frame(no_breakout=True), None) == Signal.HOLD
+
+    def test_only_first_breakout_taken(self):
+        # The current bar is the SECOND breakout; an earlier bar already broke
+        # out, so no new entry.
+        df = self._orb_frame("long", second_breakout=True)
+        assert self._strategy().evaluate(df, None) == Signal.HOLD
+
+    def test_no_entry_after_cutoff(self):
+        # 25 inside bars pushes the breakout past 12:00 ET.
+        df = self._orb_frame("long", n_inside=25)
+        assert df.index[-1].time().strftime("%H:%M") > "12:00"
+        assert self._strategy(entry_end="12:00").evaluate(df, None) == Signal.HOLD
+
+    def test_initial_stop_range_mode_is_or_low(self):
+        df = self._orb_frame("long")
+        assert self._strategy(stop_mode="range").initial_stop(df, "long") == pytest.approx(599.0)
+
+    def test_initial_stop_atr_mode_below_entry(self):
+        df = self._orb_frame("long")
+        stop = self._strategy(stop_mode="atr", stop_atr=1.0).initial_stop(df, "long")
+        assert stop is not None and stop < float(df["Close"].iloc[-1])
+
+    def _manage_frame(self, ts, o, h, l, c):
+        idx = pd.DatetimeIndex([pd.Timestamp(ts, tz="America/New_York")])
+        return pd.DataFrame({"Open": [o], "High": [h], "Low": [l],
+                             "Close": [c], "Volume": [1000.0]}, index=idx)
+
+    def _position(self):  # long 602 entry, stop 599 -> risk 3/share
+        return {"ticker": "SPY", "name": "S&P 500", "side": "long",
+                "entry_price": 602.0, "stop_price": 599.0,
+                "quantity": 10.0, "risk_amount": 30.0}
+
+    def test_manage_takes_profit_at_target(self):
+        df = self._manage_frame("2026-06-09 11:00", 604.5, 605.5, 604.4, 605.2)
+        action = self._strategy(target_r=1.0).manage(df, self._position())
+        assert action == {"exit": "target", "price": 605.0}  # 602 + 1.0*3
+
+    def test_manage_flattens_at_end_of_day(self):
+        df = self._manage_frame("2026-06-09 15:50", 601, 601, 600, 600)
+        assert self._strategy().manage(df, self._position()) == {"exit": "EOD flatten"}

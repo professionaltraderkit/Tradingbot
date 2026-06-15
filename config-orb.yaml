@@ -1,0 +1,70 @@
+# Opening-Range Breakout Bot — a separate bot instance.
+#
+# Trades the first breakout of the day's opening range on SPY/QQQ, 5m.
+# A different mechanism from the VWAP bot: it rides a volatility expansion
+# off the open rather than fading a level.
+#
+#   python run.py --config config-orb.yaml
+#   python run.py --config config-orb.yaml --status
+#   python backtest.py --config config-orb.yaml
+#   python optimize.py --config config-orb.yaml
+
+name: "ORB Bot"
+
+account:
+  starting_equity: 100000.0
+  currency: USD
+
+timezone: America/New_York
+
+broker:
+  mode: alpaca_paper
+  # Shares the Alpaca paper account with the other bots — don't run the same
+  # ticker in two configs at once.
+
+reports:
+  morning: "07:10"   # offset so Telegram messages don't collide
+  evening: "21:10"
+
+risk:
+  risk_per_trade_pct: 1.0
+  atr_period: 14
+  atr_stop_multiple: 2.0          # unused: the strategy sets its own stop
+  max_position_notional_pct: 100
+  correlation_filter:
+    group: [SPY, QQQ]
+    max_same_direction: 2
+
+costs:
+  per_side_bps: 2.0
+
+instruments:
+  - name: "S&P 500"
+    ticker: "SPY"
+    timeframe: "5m"
+    strategy: opening_range_breakout
+    params: &orb_params
+      or_minutes: 30            # opening-range length (first 30 min)
+      bar_minutes: 5
+      buffer_pct: 0.02          # breakout must clear the level by this %
+      stop_mode: range          # "range" (stop at OR opposite) or "atr"
+      stop_atr: 1.0             # used only when stop_mode: atr
+      target_r: 1.0             # target as R multiple (0 = no fixed target)
+      trail_atr: 0.0            # >0 enables ATR trailing stop
+      use_breakeven: true
+      breakeven_r: 1.0
+      atr_len: 14
+      use_volume_filter: false
+      vol_len: 20
+      session_open: "09:30"
+      entry_end: "12:00"        # no new breakouts after midday
+      flatten_at: "15:50"
+
+  - name: "Nasdaq 100"
+    ticker: "QQQ"
+    timeframe: "5m"
+    strategy: opening_range_breakout
+    params: *orb_params
+
+storage:
+  db_path: "orbbot.db"
