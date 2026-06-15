@@ -75,16 +75,17 @@ def optimize_instrument(inst, df, risk, atr_period, equity, max_notional_pct,
           f"{len(train_df)} train bars / {len(test_df)} test bars ===")
 
     all_combos = list(combos(GRID))
+    total = len(all_combos)
     min_test = max(3, min_trades // 3)  # the test slice is smaller
     rows = []
     for n, combo in enumerate(all_combos, 1):
-        print(f"  [{n}/{len(all_combos)}] {combo}", end="\r", flush=True)
+        if n == 1 or n % 12 == 0 or n == total:  # periodic, one line each
+            print(f"  ...evaluating {n}/{total} combos")
         res = evaluate(inst, train_df, test_df, combo, risk, atr_period,
                        equity, max_notional_pct, cost_bps)
         if res and res["train"]["trades"] >= min_trades \
                 and res["test"]["trades"] >= min_test:
             rows.append(res)
-    print(" " * 70, end="\r")  # clear progress line
 
     if not rows:
         print("  No combo produced enough trades on both slices. "

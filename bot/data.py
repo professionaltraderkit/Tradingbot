@@ -19,12 +19,14 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-_LOOKBACK_DAYS = {"5m": 30, "15m": 10, "1h": 60, "4h": 120}
+_LOOKBACK_DAYS = {"5m": 60, "15m": 10, "1h": 60, "4h": 120}
 _MAX_RETRIES = 3
 
 # yfinance fallback fetch plan: (interval, period). 4h is resampled from 1h.
+# 5m is fetched at Yahoo's maximum 60-day intraday window for the largest
+# possible sample (more trades -> more reliable train/test optimization).
 _YF_PLAN = {
-    "5m": ("5m", "30d"),
+    "5m": ("5m", "60d"),
     "15m": ("15m", "10d"),
     "1h": ("1h", "60d"),
     "4h": ("1h", "120d"),
