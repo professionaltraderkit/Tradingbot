@@ -9,16 +9,24 @@ from bot.state import StateStore
 
 
 class FakeBroker:
-    def __init__(self, equity=100_000.0, fills=None):
+    def __init__(self, equity=100_000.0, fills=None, holdings=None):
         self._equity = equity
         self.fills = list(fills or [])
         self.orders = []
+        # symbol -> signed quantity Alpaca "holds", mirroring a real account
+        # so position_qty() reflects fills (and any seeded drift).
+        self.holdings = dict(holdings or {})
 
     def account_equity(self):
         return self._equity
 
+    def position_qty(self, symbol):
+        return abs(self.holdings.get(symbol, 0.0))
+
     def submit_market_order(self, symbol, side, qty):
         self.orders.append((symbol, side, qty))
+        self.holdings[symbol] = self.holdings.get(symbol, 0.0) + (
+            qty if side == "buy" else -qty)
         return self.fills.pop(0)
 
 
@@ -97,6 +105,40 @@ def test_stop_not_triggered_above_stop_price(store):
     pf.open_position("SPY", "S&P 500", plan(entry=600.0, stop=598.0))
     assert pf.check_stop("SPY", 599.0, 599.0) is None
     assert len(pf.open_positions()) == 1
+
+
+def _seed_position(store, ticker="SPY", side="long", qty=10.0, entry=600.0,
+                   stop=598.0):
+    store.save_position({
+        "ticker": ticker, "name": "S&P 500", "side": side, "quantity": qty,
+        "entry_price": entry, "stop_price": stop, "risk_amount": 200.0,
+        "opened_at": "2026-01-01T00:00:00+00:00",
+    })
+
+
+def test_close_sizes_to_alpaca_held_quantity_when_local_drifts(store):
+    # Local store claims 133.74 SPY but Alpaca only holds 1.84 (the partial
+    # fill that produced the original "insufficient qty" 403). The close must
+    # size to what's really there, not the stale local number.
+    broker = FakeBroker(fills=[605.0], holdings={"SPY": 1.84})
+    pf = LivePortfolio(store, broker)
+    _seed_position(store, qty=133.74)
+    trade = pf.close_position("SPY", 605.0, reason="stop")
+    assert broker.orders == [("SPY", "sell", 1.84)]
+    assert trade["quantity"] == pytest.approx(1.84)
+    assert trade["pnl"] == pytest.approx((605.0 - 600.0) * 1.84)
+    assert pf.open_positions() == []
+
+
+def test_close_reconciles_when_alpaca_shows_no_position(store):
+    # Alpaca holds nothing (closed out-of-band). The stale local record is
+    # cleared without sending an order that would just be rejected.
+    broker = FakeBroker(holdings={})
+    pf = LivePortfolio(store, broker)
+    _seed_position(store, qty=10.0)
+    assert pf.close_position("SPY", 605.0, reason="stop") is None
+    assert broker.orders == []
+    assert pf.open_positions() == []
 
 
 def test_equity_comes_from_broker(store):

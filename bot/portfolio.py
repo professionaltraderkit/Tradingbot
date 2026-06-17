@@ -169,12 +169,31 @@ class LivePortfolio(_PortfolioBase):
         return self._save_open(ticker, name, plan, fill, stop)
 
     def close_position(self, ticker: str, price: float, reason: str) -> dict | None:
-        """`price` is only a hint for logging; the real exit is a market fill."""
+        """`price` is only a hint for logging; the real exit is a market fill.
+        Size the order to what Alpaca actually holds — never the local record
+        alone — so a drifted quantity (partial fill, out-of-band change) can't
+        get the close rejected for insufficient quantity."""
         pos = self.store.get_position(ticker)
         if not pos:
             return None
+        held = self.broker.position_qty(ticker)
+        qty = min(pos["quantity"], held)
+        if qty <= 0:
+            # Nothing to sell at Alpaca: reconcile the stale local record
+            # instead of submitting an order that would just be rejected.
+            log.warning("%s held 0 at Alpaca but %.6f locally — clearing the "
+                        "stale local position", ticker, pos["quantity"])
+            self.store.log_event(
+                "reconcile",
+                f"{pos['name']} ({ticker}) cleared — nothing held at Alpaca")
+            self.store.delete_position(ticker)
+            return None
+        if qty < pos["quantity"]:
+            log.warning("%s: closing %.6f held at Alpaca, not %.6f recorded "
+                        "locally", ticker, qty, pos["quantity"])
+            pos["quantity"] = qty  # report P&L on what we actually closed
         order_side = "sell" if pos["side"] == "long" else "buy"
-        fill = self.broker.submit_market_order(ticker, order_side, pos["quantity"])
+        fill = self.broker.submit_market_order(ticker, order_side, qty)
         return self._record_close(pos, fill, reason)
 
     def check_stop(self, ticker: str, bar_high: float, bar_low: float) -> dict | None:

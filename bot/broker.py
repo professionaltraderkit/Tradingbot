@@ -33,6 +33,20 @@ class AlpacaBroker:
     def account_equity(self) -> float:
         return float(self.client.get_account().equity)
 
+    def position_qty(self, symbol: str) -> float:
+        """Quantity Alpaca currently holds for `symbol`, as a positive number
+        of shares/units available to trade right now (0.0 when flat). Alpaca,
+        not the local store, is the source of truth for what we can close."""
+        from alpaca.common.exceptions import APIError
+
+        try:
+            pos = self.client.get_open_position(symbol)
+        except APIError as exc:
+            if exc.status_code == 404:  # no open position for this symbol
+                return 0.0
+            raise
+        return abs(float(pos.qty_available))
+
     def submit_market_order(self, symbol: str, side: str, qty: float) -> float:
         """Submit a market order ('buy'/'sell') and block until filled.
         Returns the average fill price."""
