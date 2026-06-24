@@ -1,0 +1,6 @@
+Downloading 33 tickers, 4.0y daily ...
+HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: WBA"}}}
+$WBA: possibly delisted; no price data found  (period=1460d) (Yahoo error = "No data found, symbol may be delisted")
+
+1 Failed download:
+['WBA']: possibly delisted; no price data found  (period=1460d) (Yahoo error = "No data found, symbol may be delisted")

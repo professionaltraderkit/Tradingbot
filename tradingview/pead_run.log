@@ -1,0 +1,11 @@
+Downloading prices for 73 tickers...
+  ...10/72 tickers, 847 events
+  ...20/72 tickers, 1648 events
+  ...30/72 tickers, 2477 events
+  ...40/72 tickers, 3265 events
+  ...50/72 tickers, 4114 events
+  ...60/72 tickers, 4963 events
+  ...70/72 tickers, 5805 events
+Built 5961 earnings events.
+
+Saved 5961 events -> pead_events.csv
