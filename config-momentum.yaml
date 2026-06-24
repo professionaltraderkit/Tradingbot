@@ -1,0 +1,36 @@
+# Cross-sectional momentum rotation — a portfolio-level bot (config-momentum.yaml).
+#
+# Each month it ranks the universe by 12-1 momentum, holds the top N
+# equal-weight, and (with regime_filter on) steps aside to cash when the
+# benchmark is below its 200-day average. Run it with momentum_backtest.py.
+
+name: "Momentum Rotation"
+
+account:
+  starting_equity: 100000.0
+  currency: USD
+
+costs:
+  # Per side, in basis points of traded notional, charged on rebalance
+  # turnover — same convention as backtest.py. 3 bp is a conservative
+  # estimate for liquid ETFs on a once-a-month rotation.
+  per_side_bps: 3.0
+
+momentum:
+  # Fixed, survivorship-bias-free ETF universe: 9 sector SPDRs plus
+  # asset-class diversifiers (gold, long bonds, developed + emerging
+  # international, REITs). ETFs don't delist, so no point-in-time
+  # constituent problem — unlike a single-stock universe.
+  universe: [XLB, XLE, XLF, XLI, XLK, XLP, XLU, XLV, XLY, GLD, TLT, EFA, EEM, IYR]
+  benchmark: SPY            # used for the regime filter and as the buy-&-hold yardstick
+  lookback_days: 252        # ~12 months
+  skip_days: 21             # skip the most recent ~month (avoids short-term reversal)
+  top_n: 4                  # hold the top 4 (~top quartile of 14)
+  require_positive: true    # a name must have positive 12-1 momentum to be held
+  regime_filter: true       # go to cash when SPY < its regime_sma-day average
+  regime_sma: 200
+
+backtest:
+  years: 20                 # how much daily history to pull
+  train_years: 6            # walk-forward in-sample window
+  test_years: 2             # walk-forward out-of-sample step

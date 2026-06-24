@@ -86,6 +86,42 @@ class MarketData:
             log.warning("Latest price failed for %s: %s", ticker, exc)
             return None
 
+    def fetch_daily(self, ticker: str, years: float = 20.0) -> pd.DataFrame:
+        """Split/dividend-adjusted daily OHLCV for the last `years` years.
+
+        Always sourced from Yahoo Finance: cross-sectional momentum needs a
+        long, total-return-adjusted daily history, which the free Alpaca IEX
+        feed doesn't provide. Columns are Open/High/Low/Close/Volume on a
+        tz-naive DatetimeIndex; empty DataFrame on failure.
+        """
+        import yfinance as yf
+        start = (datetime.now(timezone.utc).date()
+                 - timedelta(days=int(years * 365.25)))
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                df = yf.download(_yf_symbol(ticker), start=start.isoformat(),
+                                 interval="1d", auto_adjust=True, progress=False)
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df = df.copy()
+                        df.columns = df.columns.get_level_values(0)
+                    cols = [c for c in ("Open", "High", "Low", "Close", "Volume")
+                            if c in df.columns]
+                    df = df[cols].dropna(subset=["Close"])
+                    idx = pd.to_datetime(df.index)
+                    if idx.tz is not None:
+                        idx = idx.tz_localize(None)
+                    df.index = idx
+                    return df
+                log.warning("Empty daily data for %s (attempt %d/%d)",
+                            ticker, attempt, _MAX_RETRIES)
+            except Exception as exc:
+                log.warning("Daily fetch failed for %s (attempt %d/%d): %s",
+                            ticker, attempt, _MAX_RETRIES, exc)
+            if attempt < _MAX_RETRIES:
+                time.sleep(2 * attempt)
+        return pd.DataFrame()
+
     # -- Alpaca ----------------------------------------------------------------
     def _alpaca_timeframe(self, timeframe: str):
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
