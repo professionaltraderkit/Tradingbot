@@ -149,6 +149,36 @@ python optimize.py --config config-orb.yaml
 python run.py --config config-orb.yaml
 ```
 
+## The fourth bot: Cross-Sectional Momentum
+
+`config-momentum.yaml` defines a portfolio-level bot — a different shape
+from the three intraday bots above. Once a month it ranks a fixed,
+survivorship-bias-free ETF universe (9 sector SPDRs plus gold, long bonds,
+developed + emerging international, and REITs) by **12-1 momentum** (the
+trailing 12-month return, skipping the most recent month to dodge
+short-term reversal), holds the **top 4 equal-weight**, and — with the
+regime filter on — steps aside to cash whenever SPY is below its 200-day
+average. It has its own engine (`momentum_backtest.py`) and selection logic
+(`bot/momentum.py`) rather than the per-symbol `Strategy` / `backtest.py`
+machinery, because it needs years of daily history and ranks the whole
+universe at once. Daily data is Yahoo (split/dividend adjusted); rebalance
+turnover is charged at the same per-side-bps cost convention.
+
+```bash
+python momentum_backtest.py                    # full + walk-forward, regime on vs off
+python momentum_backtest.py --today            # this month's target book only
+python momentum_backtest.py --no-regime-filter # force the filter off
+python momentum_backtest.py --cost-bps 5 --top-n 3
+```
+
+It prints this month's ranked book, a full-period backtest (in-sample), and
+a **walk-forward** out-of-sample test that re-picks parameters on each
+in-sample window and scores them on the next — the honest number.
+Everything runs both with and without the 200-day regime filter against an
+SPY buy-&-hold yardstick, so the trade-off the filter makes is visible
+rather than assumed. As with every bot here, the result is a hypothesis to
+forward-test, not a guarantee. No live execution yet — research stage only.
+
 ## Backtesting
 
 ```bash
@@ -167,21 +197,47 @@ losses; above 1.0 is profitable), **Expect$** (average $ per trade),
 net P&L, return %, and max drawdown. Backtests always use the internal
 simulator — no orders are sent.
 
-## Optimizing (find better parameters on your own data)
+## Optimizing + the walk-forward Checker
 
 ```bash
 python optimize.py --config config-levels.yaml
+python optimize.py --config config-orb.yaml --wf-splits 4
+python optimize.py --ledger-summary          # what's been tried + verdicts so far
 ```
 
-Sweeps a grid of strategy parameters (ADX threshold, stop distance, target
-R, trailing stop, breakeven, morning-only vs full session) for each
-instrument. Crucially it splits the history into an **in-sample** slice and
-an **out-of-sample** slice and ranks combinations by how well they hold up
-on *both* — the guardrail against overfitting. The top in-sample result is
-almost always a fluke, especially on a month of data; a combo that is
-positive on both slices is the only kind worth forward-testing. It prints a
-ranked table and a ready-to-paste `params:` block, but treats every result
-as a hypothesis, not a guarantee.
+This is the **maker-checker loop** for the per-symbol bots. The *Maker* sweeps a
+grid of strategy parameters (ADX threshold, stop distance, target R, trailing
+stop, breakeven, entry window) and ranks them on the full history — the
+exploratory table. The *Checker* (`validation.py`) then takes the winner and
+tries to kill it with three guards a single backtest can't:
+
+- **Walk-forward** (expanding window): each fold re-picks its own best params on
+  the bars seen so far and is scored on the next, unseen chunk. The pooled
+  out-of-sample trades — never used to choose params — are the honest result.
+- **Multiple-testing penalty:** sweeping N combos and keeping the best is data
+  snooping, so the chosen combo must beat the *expected best t-stat of N noise
+  strategies* (a deflated-Sharpe-style bar; Bailey & López de Prado).
+- **In→out decay:** if the per-trade edge mostly evaporates out of sample, it
+  was a fit, not a signal.
+
+Only combos that clear all three earn a **PASS** and land in the ready-to-paste
+`params:` block; the rest are reported as **WEAK** or **VETO** with the specific
+reason. "No PASS" is a normal, honest outcome — not a failure of the search.
+
+### The experiment ledger
+
+Every verdict (params, data window, OOS metrics, the snooping bar, PASS/WEAK/VETO
+and *why*) is written to `experiments.db` via `bot/ledger.py`, so the search is
+**stateful and compounds** instead of starting cold each run. Disable with
+`--no-ledger`. Query it from code (or let an agent do it):
+
+```python
+from bot.ledger import ExperimentLedger
+led = ExperimentLedger()
+led.best("vwap_pullback", "SPY")   # top validated config to deploy
+led.seen("vwap_pullback", "SPY", {...})  # has this exact config been tried?
+led.summary()                      # {'PASS': 3, 'WEAK': 11, 'VETO': 40}
+```
 
 ## Tuning
 
@@ -205,22 +261,29 @@ python -m pytest
 Covers the indicator math, the 1%-risk sizing and notional cap, the
 correlation filter, stop enforcement and P&L accounting, Alpaca order
 mechanics against a mocked broker (fill slippage, quantity rounding,
-stop anchoring), plus an end-to-end engine test on synthetic data
-(no network needed).
+stop anchoring), the walk-forward Checker (t-stats, the multiple-testing
+bar, the PASS/WEAK/VETO verdict on a synthetic edge) and the experiment
+ledger, plus an end-to-end engine test on synthetic data (no network needed).
 
 ## Project layout
 
 ```
 run.py                 entrypoint: live loop / --once / --report
 backtest.py            historical simulation using the same components
+optimize.py            grid-sweep Maker + walk-forward Checker + ledger writes
+validation.py          the Checker: walk-forward, multiple-testing bar, verdict
+momentum_backtest.py   cross-sectional momentum: backtest + walk-forward
 config.yaml            all tunables
+config-momentum.yaml   the momentum bot's universe and parameters
 bot/data.py            Alpaca market data (IEX stocks + crypto), Yahoo fallback
 bot/broker.py          Alpaca trading API wrapper (paper by default)
 bot/indicators.py      SMA, EMA, RSI, ATR, z-score, Donchian channels
 bot/strategies/        mean_reversion, momentum_breakout, trend_following
+bot/momentum.py        cross-sectional momentum selection (portfolio-level)
 bot/risk.py            ATR sizing, notional cap, stops, correlation filter
 bot/portfolio.py       PaperPortfolio (simulator) + LivePortfolio (Alpaca)
 bot/state.py           SQLite persistence (positions, trades, events)
+bot/ledger.py          experiment ledger: every validation verdict, queryable
 bot/engine.py          scheduling, stop sweep, signal→risk→fill pipeline
 bot/reporter.py        7am briefing and 9pm report content
 bot/notify.py          Telegram delivery (console fallback)
