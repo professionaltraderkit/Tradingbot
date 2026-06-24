@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Parameter optimizer for the VWAP-pullback bot (config-levels.yaml).
+"""Parameter optimizer + walk-forward Checker for the per-symbol bots.
 
     python optimize.py [--config config-levels.yaml] [--days N]
-                       [--train-frac 0.7] [--min-trades 15] [--top 12]
+                       [--wf-splits 3] [--min-trades 15] [--min-oos-trades 20]
+                       [--top 12] [--no-ledger] [--ledger-summary]
 
-For each instrument it splits the real history into an in-sample (train)
-slice and an out-of-sample (test) slice, sweeps a grid of strategy
-parameters, and ranks combinations by how well they hold up on BOTH
-slices — not just the best in-sample fit. That ranking is the whole point:
-the top in-sample result is almost always overfit, especially on a month
-of data. A combo that is positive in-sample AND out-of-sample is the only
-kind worth trusting, and even then only as a hypothesis to forward-test on
-paper.
+Two halves of the maker-checker pattern:
 
-Costs are charged exactly as in backtest.py, so results are net.
+  * Maker  - sweep a grid of strategy parameters over the full history and rank
+    them (the exploratory table).
+  * Checker - hand the winner to validation.walk_forward: an expanding-window
+    walk-forward that re-picks params out-of-sample, penalizes the grid search
+    for multiple testing (a deflated-Sharpe-style bar), and measures in->out
+    decay. Only combos that survive earn a PASS.
+
+Every ruling - PASS / WEAK / VETO with its numbers - is written to the experiment
+ledger (bot/ledger.py) so the search compounds across runs instead of starting
+cold each month. Costs are charged exactly as in backtest.py, so results are net.
+
+    python optimize.py --ledger-summary     # what's been tried + verdicts so far
 """
 
 import argparse
@@ -25,13 +30,16 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 
-from backtest import DEFAULT_COST_BPS, backtest_instrument, build_risk
+import validation
+from backtest import DEFAULT_COST_BPS, build_risk
 from bot.data import MarketData
+from bot.ledger import ExperimentLedger, current_git_sha
 
 log = logging.getLogger(__name__)
 
 # Grid swept per strategy. Keys must be that strategy's constructor params.
-# Keep each modest — every combo is a full backtest on both slices.
+# Keep each modest - every combo is a full backtest on the whole history AND on
+# every walk-forward training window.
 GRIDS = {
     "vwap_pullback": {
         "adx_min": [18, 25, 32],
@@ -62,86 +70,118 @@ def combos(grid: dict):
         yield combo
 
 
-def evaluate(inst, train_df, test_df, combo, risk, atr_period,
-             equity, max_notional_pct, cost_bps):
-    variant = {**inst, "params": {**inst.get("params", {}), **combo}}
-    try:
-        tr = backtest_instrument(variant, train_df, risk, atr_period,
-                                 equity, max_notional_pct, cost_bps)
-        te = backtest_instrument(variant, test_df, risk, atr_period,
-                                 equity, max_notional_pct, cost_bps)
-    except Exception as exc:  # invalid combo for this strategy
-        log.debug("combo failed: %s", exc)
-        return None
-    return {"combo": combo, "train": tr, "test": te,
-            "robust": min(tr["return_pct"], te["return_pct"])}
+def _print_table(rows: list[dict], top: int) -> None:
+    """The Maker's exploratory ranking - full-history fit, no overfit guard yet."""
+    print(f"\n  {'Ret%':>7} {'PF':>5} {'Tr':>5} {'Exp$':>9} | params")
+    print("  " + "-" * 72)
+    for r in rows[:top]:
+        s = r["stats"]
+        pf = "inf" if s["profit_factor"] == float("inf") else f"{s['profit_factor']:.2f}"
+        params = ", ".join(f"{k}={v}" for k, v in r["combo"].items())
+        print(f"  {s['return_pct']:>7.2f} {pf:>5} {s['trades']:>5} "
+              f"{s['expectancy']:>9.2f} | {params}")
 
 
-def optimize_instrument(inst, df, risk, atr_period, equity, max_notional_pct,
-                        cost_bps, train_frac, min_trades, top):
+def _print_verdict(wf: validation.WalkForwardResult) -> None:
+    v = wf.verdict
+    print(f"\n  Walk-forward verdict: {v.verdict}   "
+          f"({wf.n_folds} OOS folds, N={wf.n_trials} combos searched)")
+    print(f"    IS return {wf.is_return:+.2f}%  ->  OOS return {wf.oos_return:+.2f}% "
+          f"on {wf.oos_trades} trades")
+    print(f"    OOS t-stat {wf.oos_tstat:.2f} vs snooping bar {v.threshold_t:.2f}  |  "
+          f"folds +ve {v.consistency * 100:.0f}%  |  in->out decay {v.gap * 100:.0f}%")
+    if wf.best_combo:                 # always show the params that were tested
+        label = "deploy" if v.passed else "candidate (tested, not cleared)"
+        print(f"    {label}: " +
+              ", ".join(f"{k}={val}" for k, val in wf.best_combo.items()))
+    if v.passed:
+        print("    -> survived out-of-sample. A hypothesis worth paper-forward-testing.")
+    else:
+        for reason in v.reasons:
+            print(f"      - {reason}")
+        print("    -> not validated; don't deploy this on hope.")
+
+
+def optimize_instrument(inst: dict, df: pd.DataFrame, ctx: validation.BacktestContext,
+                        min_trades: int, top: int, wf_splits: int,
+                        min_oos_trades: int):
     grid = GRIDS.get(inst["strategy"])
     if grid is None:
-        print(f"\n=== {inst['name']} ({inst['ticker']}) — no optimizer grid "
-              f"for strategy '{inst['strategy']}', skipping ===")
+        print(f"\n=== {inst['name']} ({inst['ticker']}) - no optimizer grid for "
+              f"strategy '{inst['strategy']}', skipping ===")
         return None
-    split = int(len(df) * train_frac)
-    train_df, test_df = df.iloc[:split], df.iloc[split:]
-    print(f"\n=== {inst['name']} ({inst['ticker']}) — "
-          f"{len(train_df)} train bars / {len(test_df)} test bars ===")
-
     all_combos = list(combos(grid))
-    total = len(all_combos)
-    min_test = max(3, min_trades // 3)  # the test slice is smaller
-    rows = []
-    for n, combo in enumerate(all_combos, 1):
-        if n == 1 or n % 12 == 0 or n == total:  # periodic, one line each
-            print(f"  ...evaluating {n}/{total} combos")
-        res = evaluate(inst, train_df, test_df, combo, risk, atr_period,
-                       equity, max_notional_pct, cost_bps)
-        if res and res["train"]["trades"] >= min_trades \
-                and res["test"]["trades"] >= min_test:
-            rows.append(res)
+    print(f"\n=== {inst['name']} ({inst['ticker']}) - {len(df)} bars, "
+          f"{len(all_combos)} combos x {wf_splits + 1} windows ===")
 
+    # Maker: sweep the full history -> ranked table, deploy pick, snooping spread.
+    best_combo, best_stats, rows, trial_tstats = validation.select(
+        inst, df, all_combos, ctx, min_trades)
     if not rows:
-        print("  No combo produced enough trades on both slices. "
-              "Try --min-trades lower or --days higher.")
+        print("  No combo produced any trades here. Try --days higher.")
+        return None
+    _print_table(rows, top)
+    if best_combo is None:
+        print(f"\n  No combo cleared {min_trades} trades in-sample; nothing to validate.")
         return None
 
-    rows.sort(key=lambda r: r["robust"], reverse=True)
-    print(f"\n  {'trTr':>5} {'trRet%':>7} {'trPF':>5} | "
-          f"{'teTr':>5} {'teRet%':>7} {'tePF':>5} | params")
-    print("  " + "-" * 78)
-    for r in rows[:top]:
-        tr, te = r["train"], r["test"]
-        tr_pf = "inf" if tr["profit_factor"] == float("inf") else f"{tr['profit_factor']:.2f}"
-        te_pf = "inf" if te["profit_factor"] == float("inf") else f"{te['profit_factor']:.2f}"
-        params = ", ".join(f"{k}={v}" for k, v in r["combo"].items())
-        print(f"  {tr['trades']:>5} {tr['return_pct']:>7.2f} {tr_pf:>5} | "
-              f"{te['trades']:>5} {te['return_pct']:>7.2f} {te_pf:>5} | {params}")
+    # Checker: walk-forward the selection procedure out-of-sample.
+    wf = validation.walk_forward(
+        inst, df, all_combos, ctx,
+        preselected=(best_combo, trial_tstats, best_stats),
+        n_splits=wf_splits, min_train_trades=min_trades,
+        min_oos_trades=min_oos_trades)
+    _print_verdict(wf)
+    return wf
 
-    best = rows[0]
-    robust_positive = best["train"]["return_pct"] > 0 and best["test"]["return_pct"] > 0
-    print(f"\n  Best robust combo: {best['combo']}")
-    if robust_positive:
-        print("  -> positive in-sample AND out-of-sample. Worth paper-forward-testing.")
-    else:
-        print("  -> NOT positive on both slices. No reliable edge found here; "
-              "do not deploy this on hope.")
-    return best
+
+def _print_ledger_summary(db_path: str) -> None:
+    ledger = ExperimentLedger(db_path)
+    counts = ledger.summary()
+    rows = ledger.recent(limit=15)
+    ledger.close()
+    if not rows:
+        print("Experiment ledger is empty. Run the optimizer to populate it.")
+        return
+    print("Experiment ledger -> " +
+          ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+    print(f"\n  {'id':>4} {'when':<16} {'strategy':<22} {'tkr':<6} "
+          f"{'verdict':<7} {'OOS%':>7} {'t':>5} {'bar':>5}")
+    print("  " + "-" * 82)
+    for r in rows:
+        when = (r["created_at"] or "")[:16].replace("T", " ")
+        print(f"  {r['id']:>4} {when:<16} {r['strategy']:<22} {r['ticker']:<6} "
+              f"{r['verdict']:<7} {r['oos_return'] or 0:>7.2f} "
+              f"{r['oos_tstat'] or 0:>5.2f} {r['threshold_t'] or 0:>5.2f}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Optimize VWAP-pullback params")
+    parser = argparse.ArgumentParser(
+        description="Optimize + walk-forward-validate per-symbol strategy params")
     parser.add_argument("--config", default="config-levels.yaml")
     parser.add_argument("--days", type=int, default=None)
-    parser.add_argument("--train-frac", type=float, default=0.7)
-    parser.add_argument("--min-trades", type=int, default=15)
+    parser.add_argument("--wf-splits", type=int, default=3,
+                        help="walk-forward folds (more = stricter but needs more data)")
+    parser.add_argument("--min-trades", type=int, default=15,
+                        help="minimum in-sample trades for a combo to be eligible")
+    parser.add_argument("--min-oos-trades", type=int, default=20,
+                        help="minimum pooled out-of-sample trades to trust a verdict")
     parser.add_argument("--top", type=int, default=12)
     parser.add_argument("--cost-bps", type=float, default=None)
+    parser.add_argument("--ledger-db", default="experiments.db")
+    parser.add_argument("--no-ledger", action="store_true",
+                        help="don't write results to the experiment ledger")
+    parser.add_argument("--ledger-summary", action="store_true",
+                        help="print recent ledger entries and exit")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
     load_dotenv(Path(__file__).resolve().parent / ".env")
+
+    if args.ledger_summary:
+        _print_ledger_summary(args.ledger_db)
+        return
+
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
@@ -152,9 +192,13 @@ def main() -> None:
     atr_period = risk_cfg["atr_period"]
     cost_bps = (args.cost_bps if args.cost_bps is not None
                 else config.get("costs", {}).get("per_side_bps", DEFAULT_COST_BPS))
+    ctx = validation.BacktestContext(risk, atr_period, equity, max_notional_pct, cost_bps)
+
+    ledger = None if args.no_ledger else ExperimentLedger(args.ledger_db)
+    git_sha = current_git_sha()
 
     feed = MarketData()
-    best_params = {}
+    recommended = {}
     for inst in config["instruments"]:
         df = feed.fetch_candles(inst["ticker"], inst["timeframe"])
         if df.empty:
@@ -163,19 +207,33 @@ def main() -> None:
         if args.days:
             cutoff = df.index[-1] - pd.Timedelta(days=args.days)
             df = df[df.index >= cutoff]
-        best = optimize_instrument(inst, df, risk, atr_period, equity,
-                                   max_notional_pct, cost_bps,
-                                   args.train_frac, args.min_trades, args.top)
-        if best:
-            best_params[inst["name"]] = {**inst.get("params", {}), **best["combo"]}
+        wf = optimize_instrument(inst, df, ctx, args.min_trades, args.top,
+                                 args.wf_splits, args.min_oos_trades)
+        if wf is None:
+            continue
+        if ledger is not None and wf.best_combo is not None:
+            row = validation.ledger_row(
+                inst, wf, cost_bps=cost_bps, config_file=args.config, git_sha=git_sha,
+                data_start=str(df.index[0]), data_end=str(df.index[-1]),
+                bars=len(df), timeframe=inst.get("timeframe"))
+            rid = ledger.record(row)
+            print(f"    recorded to ledger (id={rid})")
+        if wf.verdict.passed:
+            recommended[inst["name"]] = {**inst.get("params", {}), **wf.best_combo}
 
-    if best_params:
-        print("\n" + "=" * 60)
-        print("Best params per instrument (paste into config-levels.yaml,")
-        print("then re-run `python backtest.py --config config-levels.yaml`):\n")
-        print(yaml.safe_dump(best_params, sort_keys=False, default_flow_style=False))
-        print("Reminder: these are tuned on past data. The only honest test is")
-        print("forward paper trading on bars the optimizer never saw.")
+    if ledger is not None:
+        ledger.close()
+
+    print("\n" + "=" * 64)
+    if recommended:
+        print("VALIDATED params (PASS only) - paste into your config, then")
+        print("re-run `python backtest.py --config <file>`:\n")
+        print(yaml.safe_dump(recommended, sort_keys=False, default_flow_style=False))
+        print("Even these are hypotheses: the only honest test is forward paper")
+        print("trading on bars the optimizer never saw.")
+    else:
+        print("No instrument produced a PASS. There is no validated edge to deploy")
+        print("here - a real and common result, not a failure of the search.")
 
 
 if __name__ == "__main__":
