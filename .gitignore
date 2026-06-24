@@ -6,3 +6,6 @@ __pycache__/
 .cache/
 venv/
 .venv/
+
+# Nested standalone repo, not part of this project's history
+tradingview-mcp/
